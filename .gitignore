@@ -10,3 +10,7 @@ local.properties
 /.playwright-mcp/
 # Ресурсы exe генерирует build.ps1 (go-winres)
 /windows/cmd/airspoon/*.syso
+
+# Рабочие копии параллельных сессий Claude Code
+/.claude/worktrees/
+/.gradle-home/

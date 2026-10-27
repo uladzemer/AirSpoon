@@ -1,0 +1,165 @@
+# CI/CD AirSpoon: сборка и тесты передатчика (Windows) и приёмника (Android);
+# по тегу vX.Y.Z — публикация GitHub Release с готовыми exe и apk.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+# По умолчанию только чтение; contents: write выдан одному заданию release.
+permissions:
+  contents: read
+
+# Новый запуск для той же ветки/PR/тега отменяет предыдущий.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows (тесты и AirSpoonSender.exe)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: windows/go.mod
+          cache-dependency-path: windows/go.sum
+
+      # go-winres собирается build.ps1 в windows/.tools при первом запуске.
+      - name: Кэш go-winres
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: windows/.tools
+          key: go-winres-${{ runner.os }}-${{ hashFiles('windows/build.ps1') }}
+
+      # Значки, ресурсы .exe, go vet, go test (+ тег testhooks), сборка.
+      # Тесты сами пропускаются (t.Skip), если на раннере нет монитора/GPU/кодеров.
+      - name: Сборка и тесты (build.ps1)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1
+
+      - name: Проверка результата
+        shell: pwsh
+        run: |
+          $exe = Get-Item windows/bin/AirSpoonSender.exe
+          "{0} {1:N0} байт" -f $exe.Name, $exe.Length
+          if ($exe.Length -lt 1MB) { throw 'AirSpoonSender.exe подозрительно мал' }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: airspoon-sender-windows
+          path: windows/bin/AirSpoonSender.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  android:
+    name: Android (тесты и APK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # Приватные репозитории получают раннер с ~7 ГБ ОЗУ: куча Gradle побольше, чем 1100m по умолчанию build.sh.
+      GRADLE_XMX: 2500m
+      # Кэш Gradle лежит на хосте и монтируется в контейнер как /root/.gradle (build.sh принимает путь в VOLUME).
+      VOLUME: ${{ github.workspace }}/.gradle-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Образ с SDK/NDK весит несколько ГБ; предустановленные на раннере SDK и dotnet не нужны (сборка идёт в Docker).
+      - name: Освободить место на диске
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Тот же образ, что и локально (android/docker/Dockerfile); слои кэшируются в кэше GitHub Actions.
+      # Имя тега совпадает с IMAGE по умолчанию в build.sh, поэтому он не пересобирает образ.
+      - name: Образ сборки
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: android/docker
+          load: true
+          push: false
+          tags: airspoon-android-build
+          cache-from: type=gha,scope=airspoon-android-image
+          cache-to: type=gha,scope=airspoon-android-image,mode=max
+
+      - name: Кэш Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ github.workspace }}/.gradle-home/caches
+            ${{ github.workspace }}/.gradle-home/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/gradle/libs.versions.toml', 'android/**/*.gradle.kts', 'android/gradle.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # Модульные тесты, сборка debug-APK (armeabi-v7a) и проверка APK (verify-apk.sh).
+      # Подпись — общий отладочный ключ android/docker/debug.keystore, секретов нет.
+      - name: Тесты и сборка (build.sh)
+        run: |
+          mkdir -p "$VOLUME"
+          bash android/docker/build.sh testDebugUnitTest assembleDebug
+
+      # Контейнер работал от root: вернуть файлы текущему пользователю, чтобы кэш и артефакты читались.
+      - name: Права на файлы
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "$VOLUME" android/app/build android/out 2>/dev/null || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: airspoon-receiver-android
+          path: android/out/airspoon-debug-armeabi-v7a.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Отчёты тестов (при сбое)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-test-reports
+          path: android/app/build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: Публикация релиза
+    needs: [windows, android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: airspoon-*
+          merge-multiple: true
+          path: dist
+
+      - name: Создать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          test -s dist/AirSpoonSender.exe
+          test -s dist/airspoon-debug-armeabi-v7a.apk
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # Повторный запуск для того же тега: заменить файлы у существующего релиза.
+            gh release upload "$TAG" dist/AirSpoonSender.exe dist/airspoon-debug-armeabi-v7a.apk --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" dist/AirSpoonSender.exe dist/airspoon-debug-armeabi-v7a.apk \
+              --repo "$REPO" --title "$TAG" --generate-notes --verify-tag
+          fi
