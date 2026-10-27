@@ -49,6 +49,6 @@
 - [x] Щелчки и пропадания звука — [audio-clicks.md](audio-clicks.md): ретрай декодера, плавные переходы, «запас помнит провалы Wi-Fi». Контроль на P7: 3 мин, 36 провалов Wi-Fi, 0 пропаданий
 
 ## Веха 4 — выпуск
-- [ ] GitHub Actions: .exe и .apk в Releases
+- [x] GitHub Actions (`.github/workflows/ci.yml`, 2026-10-27): каждый пуш/PR — тесты + .exe и .apk в артефактах; тег `v*.*.*` — Release с обоими файлами. Первый зелёный прогон 40547556089 (Windows ~2 мин, Android ~12 мин). Релиз по тегу ещё не пробовали
 - [ ] README на русском с картинками
 - [ ] (до Google Play) юридический разбор таблиц FairPlay; домен airspoon.app под applicationId
