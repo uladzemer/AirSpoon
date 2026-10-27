@@ -1,0 +1,219 @@
+diff --git a/lib/raop_buffer.c b/lib/raop_buffer.c
+--- a/lib/raop_buffer.c
++++ b/lib/raop_buffer.c
+@@ -67,6 +67,105 @@
+     return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+ }
+ 
++/* AirSpoon: диагностика дыр и пауз приёма (только логирование, поведение не меняет).
++ * rx_*: интервалы между UDP-датаграммами звука. Потребитель событий один: поток
++ * RAOP (audio_engine.cpp забирает их через raop_buffer_pop_hole_event). */
++static uint64_t rx_prev_ns, rx_last_gap_ns, rx_max_gap_ns;
++
++void raop_buffer_note_rx(void)
++{
++    uint64_t now = monotonic_ns();
++    uint64_t prev = __atomic_load_n(&rx_prev_ns, __ATOMIC_RELAXED);
++    if (prev) {
++        uint64_t gap = now - prev;
++        __atomic_store_n(&rx_last_gap_ns, gap, __ATOMIC_RELAXED);
++        if (gap > __atomic_load_n(&rx_max_gap_ns, __ATOMIC_RELAXED)) {
++            __atomic_store_n(&rx_max_gap_ns, gap, __ATOMIC_RELAXED);
++        }
++    }
++    __atomic_store_n(&rx_prev_ns, now, __ATOMIC_RELAXED);
++}
++
++uint32_t raop_buffer_take_max_rx_gap_ms(void)
++{
++    uint64_t gap = __atomic_exchange_n(&rx_max_gap_ns, 0, __ATOMIC_RELAXED);
++    return (uint32_t) (gap / 1000000ULL);
++}
++
++#define HOLE_EV_OPEN   1
++#define HOLE_EV_FILLED 2
++#define HOLE_EV_SKIP   3
++#define HOLE_EV_CAP    64
++
++typedef struct {
++    int type;
++    uint64_t t_ns;
++    unsigned short seq;
++    unsigned short count;
++    uint32_t ms;
++} hole_event_t;
++
++static hole_event_t hole_ev[HOLE_EV_CAP];
++static uint32_t hole_ev_w, hole_ev_r, hole_ev_dropped;
++
++static void
++hole_event_push(int type, unsigned short seq, unsigned short count, uint32_t ms)
++{
++    uint32_t w = __atomic_load_n(&hole_ev_w, __ATOMIC_RELAXED);
++    uint32_t r = __atomic_load_n(&hole_ev_r, __ATOMIC_ACQUIRE);
++    if (w - r >= HOLE_EV_CAP) {
++        __atomic_add_fetch(&hole_ev_dropped, 1, __ATOMIC_RELAXED);
++        return;
++    }
++    hole_event_t *e = &hole_ev[w % HOLE_EV_CAP];
++    e->type = type;
++    e->t_ns = monotonic_ns();
++    e->seq = seq;
++    e->count = count;
++    e->ms = ms;
++    __atomic_store_n(&hole_ev_w, w + 1, __ATOMIC_RELEASE);
++}
++
++/* формирует одну строку лога; 0 = очередь пуста. t: CLOCK_MONOTONIC в мс (как monoNs()) */
++int raop_buffer_pop_hole_event(char *line, size_t cap)
++{
++    uint32_t r = __atomic_load_n(&hole_ev_r, __ATOMIC_RELAXED);
++    uint32_t w = __atomic_load_n(&hole_ev_w, __ATOMIC_ACQUIRE);
++    if (r == w) return 0;
++    hole_event_t e = hole_ev[r % HOLE_EV_CAP];
++    __atomic_store_n(&hole_ev_r, r + 1, __ATOMIC_RELEASE);
++    long long t = (long long) (e.t_ns / 1000000ULL);
++    switch (e.type) {
++    case HOLE_EV_OPEN:
++        snprintf(line, cap, "HOLE_OPEN t=%lld seq=%u count=%u rxGapBeforeMs=%u", t, e.seq, e.count, e.ms);
++        break;
++    case HOLE_EV_FILLED:
++        snprintf(line, cap, "HOLE_FILLED t=%lld seq=%u openMs=%u", t, e.seq, e.ms);
++        break;
++    default:
++        snprintf(line, cap, "HOLE_SKIP t=%lld seq=%u count=%u openMs=%u", t, e.seq, e.count, e.ms);
++        break;
++    }
++    return 1;
++}
++
++uint32_t raop_buffer_take_hole_events_dropped(void)
++{
++    return __atomic_exchange_n(&hole_ev_dropped, 0, __ATOMIC_RELAXED);
++}
++
++/* новая сессия: не печатать чужие события и не считать паузу между сессиями паузой приёма.
++ * Зовётся из потока RAOP, он же единственный потребитель очереди. */
++static void
++diag_reset(void)
++{
++    __atomic_store_n(&rx_prev_ns, 0, __ATOMIC_RELAXED);
++    __atomic_store_n(&rx_last_gap_ns, 0, __ATOMIC_RELAXED);
++    __atomic_store_n(&rx_max_gap_ns, 0, __ATOMIC_RELAXED);
++    __atomic_store_n(&hole_ev_r, __atomic_load_n(&hole_ev_w, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
++    __atomic_store_n(&hole_ev_dropped, 0, __ATOMIC_RELAXED);
++}
++
+ typedef struct {
+     /* Data available */
+     int filled;
+@@ -98,6 +197,11 @@
+     int resend_asked;
+     unsigned short resend_seq;
+ 
++    /* AirSpoon: диагностика: открытая дыра (для HOLE_OPEN/FILLED/SKIP) */
++    int hole_open_valid;
++    unsigned short hole_open_seq;
++    uint64_t hole_open_ns;
++
+     /* RTP buffer entries */
+     raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];
+ };
+@@ -124,6 +228,7 @@
+     }
+ 
+     raop_buffer->is_empty = 1;
++    diag_reset(); /* AirSpoon: новая сессия, без чужих событий и ложного гэпа */
+ 
+     return raop_buffer;
+ }
+@@ -302,6 +407,13 @@
+                 /* Return nothing and hope resend gets on time */
+                 return NULL;
+             }
++            /* AirSpoon: диагностика закрытия дыры пропуском */
++            if (raop_buffer->hole_open_valid && raop_buffer->hole_open_seq == raop_buffer->first_seqnum) {
++                hole_event_push(HOLE_EV_SKIP, raop_buffer->first_seqnum,
++                                (unsigned short) (probe - raop_buffer->first_seqnum),
++                                (uint32_t) ((monotonic_ns() - raop_buffer->hole_open_ns) / 1000000ULL));
++                raop_buffer->hole_open_valid = 0;
++            }
+             /* probe — первый принятый пакет за дырой: пропускаем всё до него */
+             __atomic_add_fetch(&holes_skipped_total, (uint32_t) (unsigned short) (probe - raop_buffer->first_seqnum), __ATOMIC_RELAXED);
+             raop_buffer->first_seqnum = probe;
+@@ -313,7 +425,13 @@
+     }
+ 
+     /* Update buffer and validate entry */
++    unsigned short cur_seq = raop_buffer->first_seqnum; /* AirSpoon: для диагностики дыр */
+     raop_buffer->first_seqnum += 1;
++    if (raop_buffer->hole_open_valid && raop_buffer->hole_open_seq == cur_seq) {
++        uint32_t open_ms = (uint32_t) ((monotonic_ns() - raop_buffer->hole_open_ns) / 1000000ULL);
++        hole_event_push(entry->filled ? HOLE_EV_FILLED : HOLE_EV_SKIP, cur_seq, 1, open_ms);
++        raop_buffer->hole_open_valid = 0;
++    }
+     if (!entry->filled) {
+         __atomic_add_fetch(&holes_skipped_total, 1, __ATOMIC_RELAXED);
+         return NULL;
+@@ -346,6 +464,14 @@
+ 	    count++;
+         }
+         if (count){
++            /* AirSpoon: первая просьба о ретрансмите для этого first_seqnum: дыра открыта */
++            if (!raop_buffer->hole_open_valid || raop_buffer->hole_open_seq != raop_buffer->first_seqnum) {
++                raop_buffer->hole_open_valid = 1;
++                raop_buffer->hole_open_seq = raop_buffer->first_seqnum;
++                raop_buffer->hole_open_ns = monotonic_ns();
++                hole_event_push(HOLE_EV_OPEN, raop_buffer->first_seqnum, count,
++                                (uint32_t) (__atomic_load_n(&rx_last_gap_ns, __ATOMIC_RELAXED) / 1000000ULL));
++            }
+             raop_buffer->resend_asked = 1;
+             raop_buffer->resend_seq = raop_buffer->first_seqnum;
+             resend_cb(opaque, raop_buffer->first_seqnum, count);
+@@ -357,6 +483,7 @@
+     assert(raop_buffer);
+ 
+     raop_buffer->resend_asked = 0;
++    raop_buffer->hole_open_valid = 0;
+     for (int i = 0; i < RAOP_BUFFER_LENGTH; i++) {
+         if (raop_buffer->entries[i].payload_data) {
+             free(raop_buffer->entries[i].payload_data);
+@@ -367,6 +494,7 @@
+     }
+     if (next_seq < 0 || next_seq > 0xffff) {
+         raop_buffer->is_empty = 1;
++        diag_reset(); /* AirSpoon: полный сброс буфера = конец сессии */
+     } else {
+         raop_buffer->first_seqnum = next_seq;
+         raop_buffer->last_seqnum = next_seq - 1;
+diff --git a/lib/raop_buffer.h b/lib/raop_buffer.h
+--- a/lib/raop_buffer.h
++++ b/lib/raop_buffer.h
+@@ -39,6 +39,15 @@
+ void raop_buffer_audio_stats(uint32_t *holes_skipped, uint32_t *resend_requests);
+ void raop_buffer_note_resend_request(void);
+ 
++/* AirSpoon: диагностика приёма звука (только логи). note_rx: на каждую UDP-датаграмму
++ * звука; take_max_rx_gap_ms: максимум паузы между датаграммами с прошлого вызова
++ * (сбрасывается); pop_hole_event: одна готовая строка HOLE_* (0 = пусто);
++ * take_hole_events_dropped: сколько событий потеряно при переполнении очереди. */
++void raop_buffer_note_rx(void);
++uint32_t raop_buffer_take_max_rx_gap_ms(void);
++int raop_buffer_pop_hole_event(char *line, size_t cap);
++uint32_t raop_buffer_take_hole_events_dropped(void);
++
+ int raop_buffer_decrypt(raop_buffer_t *raop_buffer, unsigned char *data, unsigned char* output,
+                         unsigned int datalen, unsigned int *outputlen);
+ void raop_buffer_destroy(raop_buffer_t *raop_buffer);
+diff --git a/lib/raop_rtp.c b/lib/raop_rtp.c
+--- a/lib/raop_rtp.c
++++ b/lib/raop_rtp.c
+@@ -579,6 +579,8 @@
+                 continue;
+             }
+ 
++            raop_buffer_note_rx(); /* AirSpoon: диагностика пауз приёма звука */
++
+             if (!raop_rtp->initial_sync &&  raop_rtp->ct == 8 && video_arrival_offset) {
+                 /* estimate a fake initial remote timestamp for video  synchronization  with AAC audio before the first rtp sync */
+                  uint64_t ts = raop_ntp_get_local_time() - video_arrival_offset;

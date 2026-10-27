@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Монохромная версия для тематических иконок (Android 13+): тот же знак одним цветом.
+         Геометрия «Экран в экране» (plans/icons/s1.svg, сетка 1024) без изменений: группа масштабирует
+         её в 73,2 dp (1024 * 0,0715), знак (768 x 512 по сетке) целиком влезает в круг 66 dp
+         (безопасная зона adaptive icon, диагональ знака = 66 dp). Большой экран - один замкнутый
+         контур: рамка с вырезом под малый экран (в SVG это маска). -->
+    <group
+        android:translateX="17.4"
+        android:translateY="17.4"
+        android:scaleX="0.0715"
+        android:scaleY="0.0715">
+        <path
+            android:fillColor="#000000"
+            android:pathData="M768,480 V352 A96,96 0 0 0 672,256 H224 A96,96 0 0 0 128,352 V576 A96,96 0 0 0 224,672 H480 V608 H224 A32,32 0 0 1 192,576 V352 A32,32 0 0 1 224,320 H672 A32,32 0 0 1 704,352 V480 Z" />
+        <path
+            android:fillColor="#000000"
+            android:pathData="M576,512 H832 A64,64 0 0 1 896,576 V704 A64,64 0 0 1 832,768 H576 A64,64 0 0 1 512,704 V576 A64,64 0 0 1 576,512 Z" />
+    </group>
+</vector>

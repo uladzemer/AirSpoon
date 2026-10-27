@@ -1,0 +1,22 @@
+# Окончания строк: в репозитории всегда LF, на рабочей копии тоже LF (скрипты запускаются в Docker/Linux).
+* text=auto eol=lf
+
+# Windows-скрипты должны оставаться CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Бинарные файлы: не трогать окончания строк, не показывать построчный diff
+*.png binary
+*.jpg binary
+*.ico binary
+*.apk binary
+*.jar binary
+*.so binary
+*.a binary
+*.keystore binary
+*.webp binary
+*.mp4 binary
+*.ttf binary
+*.otf binary
+*.wav binary

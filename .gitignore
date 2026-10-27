@@ -1,0 +1,12 @@
+# Временные и сборочные файлы
+/windows/bin/
+*.exe
+/android/**/build/
+/android/.gradle/
+local.properties
+*.keystore
+*.jks
+/plans/research-raw.json
+/.playwright-mcp/
+# Ресурсы exe генерирует build.ps1 (go-winres)
+/windows/cmd/airspoon/*.syso

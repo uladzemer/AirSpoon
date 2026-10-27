@@ -1,0 +1,100 @@
+AirSpoon (windows/) — передатчик экрана Windows на AirPlay-приёмник.
+Лицензия: GNU GPL версии 3 или новее (см. LICENSE).
+
+Проект содержит код сторонних проектов. Заголовки авторства и лицензий
+перенесённых файлов сохранены как есть (в исходных файлах построчных
+заголовков нет, лицензия задана файлами LICENSE репозиториев-доноров).
+
+ПРОИСХОЖДЕНИЕ ФАЙЛОВ
+
+1. open-airplay — GPL-3.0
+   Репозиторий: https://github.com/parsakhaz/open-airplay
+   Коммит:      1e879a982df78b630a005fcee3ce278a56b3181d
+   (Windows-доработка проекта doubletake, см. п. 2.)
+
+   internal/airplay/ <- internal/airplay/ донора. Без изменений (с точностью
+   до перевода строк CRLF -> LF; credentials*.go оставлены в CRLF): 75 файлов
+   (сверено построчным сравнением с донором, окончания строк не учитывались):
+     aac_eld_stub.go, alac_compressed.go, audio_assembler.go,
+     audio_available.go, audio_capture_windows.go, audio_device_format.go,
+     audio_frame.go, audio_pump.go, audio_resample.go, boot_clock_other.go,
+     boot_clock_windows.go, credentials.go, credentials_keyring.go, debug.go,
+     digest.go, discovery.go, display.go, display_windows.go,
+     event_channel.go, fairplay.go, fairplay_crypto.go, fairplay_md5.go,
+     fairplay_message.go, fairplay_sap.go, fpsap.go, fpsap_tables.go,
+     latency.go, plist_types.go, receiver_digest.go, receiver_fairplay.go,
+     receiver_media.go, replay.go, stream_connection_id.go, video_codec.go
+     и все *_test.go этих файлов, кроме перечисленных ниже как изменённые.
+     Примечание: credentials.go и credentials_keyring.go по-прежнему хранят
+     ключи под именем «open-airplay» (DefaultCredentialsPath, служба keyring);
+     AirSpoon их не использует и передаёт путь к файлу сам
+     (каталог AppData, подкаталог AirSpoon, файл credentials.json).
+
+   Изменены в AirSpoon:
+     audio.go       — удалён захват звука через GStreamer/PulseAudio/PipeWire
+                      (остались RTP-упаковка, AES, ALAC, StreamAudio).
+     mirror.go      — StreamFrames принимает интерфейс VideoSource вместо
+                      *ScreenCapture; убран разбор «сырого» байтового потока.
+     mirror_hevc.go — заменён заглушкой (HEVC не поддерживается).
+     audio_frame_test.go, mirror_test.go, mirror_clock_test.go — убраны тесты
+                      GStreamer-конвейера, тесты StreamFrames переведены на
+                      VideoSource.
+     mirror.go (дополнительно) — в verbose-лог больше не пишутся байты кадра
+                      (открытые и зашифрованные), только размеры; режим
+                      совместимости UxPlay (uxplayOnly в политике SETUP).
+     client.go      — EnableUxPlayCompat (режим приёмника UxPlay).
+     compatibility.go — uxplayOnly: NTP, AES-CBC, без RFC 2198/PTP/ChaCha.
+     pairing.go     — PIN у приёмников «старого» поколения идёт через
+                      /pair-setup-pin (UxPlay) с откатом на HAP; в режиме
+                      UxPlay ключ FairPlay смешивается всегда.
+     receiver_pairing.go, receiver_server.go — тестовый приёмник:
+                      UxPlay-совместимый /pair-setup-pin, профиль
+                      uxplay-android (features 0x5a7ffee6), режим HidePINStatus.
+
+   Не перенесено из internal/airplay донора: aac_eld_fdk*.go (cgo, libfdk-aac),
+   boot_clock_linux.go, capture.go, capture_broadcast*.go, capture_frame.go
+   (разбор RTP от GStreamer), capture_process_*.go, capture_windows*.go,
+   capture_portal/x11/m2/test*.go, audio_capture_other.go, display_other.go,
+   audio_avsync_manual_test.go. Весь каталог internal/daemon не перенесён.
+
+   cmd/testreceiver/ <- cmd/doubletake-test-receiver/ донора (main.go,
+   main_test.go): изменены путь импорта, имя в справке, сводка статистики
+   дополнена счётчиками decrypted/crypto_errors/canvas, добавлены профиль
+   uxplay-android и флаг -hide-pin-status.
+
+   internal/encode/ffmpeg/args.go — аргументы ffmpeg (ddagrab, фильтры,
+   параметры libx264) выведены из capture_windows.go донора.
+
+   LICENSE — текст GPL-3.0 из репозитория донора.
+
+2. doubletake — LGPL-3.0-or-later
+   Репозиторий: https://github.com/omarroth/doubletake
+   Коммит:      5e2f1cbe3e1070bcefec8e549c7baf884727bc00
+   Исходный автор протокольного ядра (клиент AirPlay, сопряжение, FairPlay,
+   зеркалирование, тестовый приёмник). Файлы поступают в AirSpoon через
+   open-airplay (п. 1), который является его форком. Текст LGPL-3.0 лежит в
+   licenses/doubletake-LGPL-3.0.txt. По §2 LGPL-3.0 код передан на условиях
+   GPL-3.0, поэтому проект в целом распространяется под GPL-3.0-or-later.
+
+НОВЫЕ ФАЙЛЫ AirSpoon (GPL-3.0-or-later)
+   internal/airplay/video_source.go, video_source_test.go
+   internal/airplay/pairing_legacy_pin.go, receiver_legacy_pin.go и тесты
+     pairing_legacy_pin_test.go, pairing_legacy_pin_receiver_test.go
+     (PIN-сопряжение «старого» протокола AirPlay по исходникам приёмника UxPlay:
+     lib/raop_handlers.h, lib/pairing.c, lib/srp.c; UxPlay — GPL-3.0, srp.c —
+     csrp Тома Кокана, MIT)
+   internal/encode/ffmpeg/*
+   cmd/airspoon/*
+
+ЗАМЕЧАНИЯ
+   * Таблицы FairPlay (fpsap*.go, fairplay_*.go) происхождение которых не
+     проверено: см. примечание в README open-airplay (doubletake #59). Для
+     личного использования допустимо; перед публичным релизом нужен отдельный
+     юридический разбор.
+   * Проект не связан с Apple Inc. «AirPlay» и «FairPlay» — товарные знаки Apple.
+   * Зависимости (Go-модули): github.com/aead/chacha20poly1305 (MIT),
+     github.com/grandcat/zeroconf (MIT), github.com/zalando/go-keyring (MIT),
+     github.com/miekg/dns (BSD-3-Clause), golang.org/x/* (BSD-3-Clause),
+     howett.net/plist (BSD-2-Clause). Точные версии — в go.mod.
+   * ffmpeg.exe в состав AirSpoon не входит; при распространении вместе с ним
+     соблюдайте лицензию выбранной сборки FFmpeg (LGPL/GPL).

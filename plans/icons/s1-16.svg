@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" shape-rendering="crispEdges">
+  <!-- Pixel-aligned: integer coords only. 1px stroke, no radii (corner pixel removed), 1px knockout gap. Bbox x1..15,y2..14 centered on 8,8. -->
+  <defs><mask id="k" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+    <rect width="16" height="16" fill="#fff"/><rect x="7" y="7" width="9" height="9" fill="#000"/></mask></defs>
+  <rect width="16" height="16" fill="#101418"/>
+  <path fill="#F4F6F8" fill-rule="evenodd" mask="url(#k)" d="M2 2H10V3H11V8H10V9H2V8H1V3H2ZM2 3V8H10V3Z"/>
+  <path fill="#4F8CFF" d="M9 8H14V9H15V13H14V14H9V13H8V9H9Z"/>
+</svg>

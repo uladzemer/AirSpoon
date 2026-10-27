@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirSpoon Receiver</string>
+
+    <!-- Уведомление -->
+    <string name="notification_channel">Работа AirSpoon</string>
+    <string name="notification_title">AirSpoon работает</string>
+    <string name="notification_text">Готов принять экран с телефона или компьютера (совместимо с AirPlay)</string>
+    <string name="notification_pin_title">Нужен код</string>
+    <string name="notification_pin_text">Код: %1$s</string>
+    <string name="stop_service">Остановить</string>
+
+    <!-- Вкладки -->
+    <string name="tab_overview">Главная</string>
+    <string name="tab_logs">Журнал</string>
+    <string name="tab_settings">Настройки</string>
+
+    <!-- Главный экран -->
+    <string name="server_stopped">Приём выключен. Нажмите «Включить»</string>
+    <string name="waiting_for_connection">Ждём подключения…</string>
+    <string name="waiting_for_playback">Запустите показ на телефоне или компьютере…</string>
+    <string name="error_starting_server">Не удалось включить приём</string>
+    <string name="connected_count">Подключено: %d</string>
+    <string name="error_label">Ошибка</string>
+    <string name="stopped_label">Выключено</string>
+    <string name="btn_start">Включить</string>
+    <string name="btn_stop">Выключить</string>
+    <string name="btn_allow">Разрешить</string>
+    <string name="btn_open_settings">Открыть настройки</string>
+    <string name="local_network_label">Нужно разрешение для поиска устройств рядом</string>
+    <string name="local_network_desc">Разрешите доступ к устройствам рядом, чтобы телефоны и компьютеры могли найти этот телевизор и подключиться</string>
+    <string name="unknown_track">Неизвестно</string>
+
+    <!-- Описания элементов для озвучивания -->
+    <string name="cd_pip">Картинка в картинке</string>
+    <string name="cd_fullscreen">На весь экран</string>
+    <string name="cd_exit_fullscreen">Выйти из полноэкранного режима</string>
+    <string name="cd_cover_art">Обложка</string>
+    <string name="cd_play_pause">Воспроизвести или пауза</string>
+    <string name="cd_rewind">Назад</string>
+    <string name="cd_fast_forward">Вперёд</string>
+    <string name="volume_server">Громкость телевизора</string>
+    <string name="volume_client">Громкость на телефоне</string>
+    <string name="volume_value">%1$d%%</string>
+    <string name="cd_download">Скачать видео</string>
+    <string name="cd_cancel_download">Отменить скачивание</string>
+
+    <!-- Скачивание видео -->
+    <string name="download_saved">Сохранено: %1$s</string>
+    <string name="download_failed">Не удалось скачать</string>
+
+    <!-- Жесты плеера -->
+    <string name="gesture_seek_seconds">%1$d сек.</string>
+    <string name="seconds_short">%1$d с</string>
+    <string name="select_playback_speed">Скорость воспроизведения</string>
+    <string name="cd_reset_speed">Обычная скорость</string>
+    <string name="skip_silence">Пропускать тишину</string>
+
+    <!-- Управление плеером -->
+    <string name="cd_back">Назад</string>
+    <string name="cd_copy_url">Скопировать ссылку на видео</string>
+    <string name="cd_rotate">Повернуть экран</string>
+    <string name="cd_lock_controls">Заблокировать кнопки</string>
+    <string name="cd_unlock_controls">Разблокировать кнопки</string>
+    <string name="scale_best_fit">По размеру экрана</string>
+    <string name="scale_stretch">Растянуть</string>
+    <string name="scale_crop">Обрезать по краям</string>
+    <string name="scale_hundred_percent">100%</string>
+
+    <!-- Диалоги -->
+    <string name="dialog_pin_title">Код для подключения</string>
+    <string name="btn_ok">Понятно</string>
+
+    <!-- Журнал -->
+    <string name="btn_export">Отправить</string>
+    <string name="btn_clear">Очистить</string>
+    <string name="export_logs_chooser_title">Отправить журнал</string>
+
+    <!-- Разделы настроек -->
+    <string name="section_server">Приёмник</string>
+    <string name="section_connection">Подключение</string>
+    <string name="section_display">Экран</string>
+    <string name="section_decode">Видео и звук</string>
+    <string name="section_developer">Для специалистов</string>
+
+    <!-- Настройки: приёмник -->
+    <string name="setting_server_name">Имя телевизора</string>
+    <string name="setting_server_port">Порт приёма</string>
+    <string name="setting_auto_start">Включать приём при запуске программы</string>
+    <string name="setting_auto_start_desc">Приём включается сам, как только открывается программа</string>
+    <string name="setting_boot_auto_start">Включать приём при загрузке приставки</string>
+    <string name="setting_boot_auto_start_desc">Приём включается сам после включения приставки</string>
+    <string name="setting_run_in_background">Работать в фоне</string>
+    <string name="setting_run_in_background_desc">Приём продолжает работать, даже когда программа закрыта</string>
+
+    <!-- Настройки: подключение -->
+    <string name="setting_require_pin">Просить код (пробная функция)</string>
+    <string name="setting_require_pin_desc">При каждом новом подключении на экране появится 4-значный код, его нужно ввести на телефоне</string>
+    <string name="setting_allow_new_conn">Разрешить новое подключение</string>
+    <string name="setting_allow_new_conn_desc">Когда подключается другое устройство, прежнее отключается</string>
+
+    <!-- Настройки: экран -->
+    <string name="setting_idle_preview">Показывать картинку в ожидании</string>
+    <string name="setting_idle_preview_desc">Показывать область для видео, пока никто не подключён</string>
+    <string name="setting_auto_fullscreen">Сразу открывать на весь экран</string>
+    <string name="setting_auto_fullscreen_desc">Когда подключается устройство, картинка открывается на весь экран</string>
+    <string name="setting_keep_screen_on">Не выключать экран</string>
+    <string name="setting_keep_screen_on_desc">Экран не гаснет, пока устройство подключено</string>
+    <string name="setting_advertise_video">Принимать видео (совместимо с AirPlay)</string>
+    <string name="setting_advertise_video_desc">Если выключить, видео будет передаваться только звуком</string>
+    <string name="setting_advertise_mirroring">Принимать повтор экрана (совместимо с AirPlay)</string>
+    <string name="setting_advertise_mirroring_desc">Если выключить, телевизор не будет виден в списке для повтора экрана</string>
+    <string name="setting_advertise_audio">Принимать звук (совместимо с AirPlay)</string>
+    <string name="setting_advertise_audio_desc">Если выключить, телевизор будет работать только для повтора экрана и пропадёт из списка для музыки</string>
+    <string name="setting_alac">Музыка без потери качества</string>
+    <string name="setting_alac_desc">Телевизор сообщает, что умеет принимать музыку в лучшем качестве (технически: звук ALAC)</string>
+    <string name="setting_aac">Звук при повторе экрана</string>
+    <string name="setting_aac_desc">Телевизор сообщает, что умеет принимать звук вместе с картинкой; без этого звука не будет (технически: AAC-ELD и AAC-LC)</string>
+    <string name="setting_launch_on_connect">Открывать программу при подключении</string>
+    <string name="setting_launch_on_connect_desc">Когда подключается телефон или компьютер, программа сама выходит на экран</string>
+    <string name="setting_launch_on_connect_no_permission">Включено, но не выдано разрешение «Поверх других окон»: вместо экрана появится уведомление. Чтобы разрешить, выключите и включите снова</string>
+    <string name="setting_discovery">Где виден телевизор</string>
+    <string name="setting_discovery_all_desc">Виден во всех сетях (Wi-Fi и кабель).</string>
+    <string name="setting_discovery_usb_desc">Виден только при подключении по USB-кабелю. Телевизор сам отвечает на поиск устройств (технически: свой ответчик mDNS).</string>
+    <string name="chip_all_networks">Во всех сетях</string>
+    <string name="chip_usb_only">Только USB</string>
+    <string name="setting_resolution">Разрешение</string>
+    <string name="setting_resolution_desc">Размер картинки, который телевизор сообщает телефонам и компьютерам</string>
+    <string name="setting_resolution_placeholder">[Ш]x[В]</string>
+    <string name="setting_resolution_width">Ширина</string>
+    <string name="setting_resolution_height">Высота</string>
+    <string name="setting_max_fps">Максимум кадров в секунду</string>
+    <string name="setting_max_fps_desc">Наибольшая частота кадров, которую телевизор сообщает устройствам</string>
+    <string name="setting_max_fps_placeholder">Кадров/с</string>
+    <string name="setting_overscanned">Подгонка под края экрана</string>
+    <string name="setting_overscanned_desc">Добавляет поля, если телевизор обрезает края картинки</string>
+    <string name="chip_custom">Своё значение</string>
+    <string name="chip_device_portrait">Вертикально</string>
+    <string name="chip_device_landscape">Горизонтально</string>
+
+    <!-- Настройки: видео и звук -->
+    <string name="setting_h265">Видео высокой чёткости</string>
+    <string name="setting_h265_desc">Современный формат видео для чёткой картинки при меньшей нагрузке на сеть. В режиме «Авто» включается только там, где телевизор справляется (технически: H.265 / HEVC)</string>
+    <string name="setting_enforce_sdr">Обычные цвета вместо HDR</string>
+    <string name="setting_enforce_sdr_desc">Считать всё видео обычным (SDR). Выключите, чтобы передавать видео HDR без изменений (технически: KEY_COLOR_TRANSFER)</string>
+    <string name="setting_sw_alac">Расшифровка музыки процессором</string>
+    <string name="setting_sw_alac_desc">Всегда расшифровывать музыку без потери качества самой программой, а не встроенным в телевизор средством; может добавить задержку звука (технически: программный декодер ALAC)</string>
+    <string name="setting_sw_aac">Расшифровка звука процессором</string>
+    <string name="setting_sw_aac_desc">Всегда расшифровывать звук при повторе экрана самой программой, а не встроенным в телевизор средством; может добавить задержку звука (технически: программный декодер AAC)</string>
+    <string name="setting_sync_client_volume">Громкость как на телефоне</string>
+    <string name="setting_sync_client_volume_desc">Громкость телевизора следует за громкостью на телефоне или компьютере</string>
+
+    <!-- Настройки: для специалистов -->
+    <string name="setting_developer_options">Показать настройки для специалистов</string>
+    <string name="setting_developer_options_desc">Дополнительные параметры. Неопытным пользователям менять их не нужно</string>
+    <string name="setting_key_allow_frame_drop">Пропускать кадры, чтобы не отставать</string>
+    <string name="setting_key_allow_frame_drop_desc">Если телевизор не успевает, он пропускает кадры, а не запаздывает; картинка может чуть подёргиваться (Android 10 и новее; технически: KEY_ALLOW_FRAME_DROP)</string>
+    <string name="setting_realtime_decoder_priority">Срочная обработка звука</string>
+    <string name="setting_realtime_decoder_priority_desc">Просить телевизор обрабатывать звук в первую очередь, чтобы он не заикался (технически: KEY_PRIORITY)</string>
+    <string name="setting_operating_rate">Быстрая обработка видео</string>
+    <string name="setting_operating_rate_desc">Просить телевизор обрабатывать видео на наибольшей скорости (технически: KEY_OPERATING_RATE)</string>
+    <string name="chip_auto">Авто</string>
+    <string name="chip_on">Вкл.</string>
+    <string name="chip_off">Выкл.</string>
+    <string name="setting_low_latency">Малая задержка звука</string>
+    <string name="setting_low_latency_desc">Обрабатывать звук с минимальной задержкой; расходует больше энергии и мощности процессора</string>
+    <string name="setting_scheduled_output_buffer_release">Ровная смена кадров</string>
+    <string name="setting_scheduled_output_buffer_release_desc">Каждый кадр выводится строго в такт с обновлением экрана</string>
+    <string name="setting_audio_delay">Своя задержка звука</string>
+    <string name="setting_audio_delay_desc">Задать задержку звука, о которой телевизор сообщает телефону или компьютеру</string>
+    <string name="audio_delay_value">%d мс</string>
+    <string name="setting_audio_auto_buffer">Автоматический размер звукового буфера</string>
+    <string name="setting_audio_auto_buffer_desc">Размер буфера подбирается сам по состоянию сети и мощности устройства; ползунок задаёт, какие сбои сети буфер сглаживает</string>
+    <string name="audio_adaptive_value">%1$d%% (%2$s)</string>
+    <string-array name="audio_adaptive_step_names">
+        <item>Наименьшая задержка</item>
+        <item>Малая задержка</item>
+        <item>Баланс</item>
+        <item>Больше устойчивости</item>
+        <item>Наибольшая устойчивость</item>
+    </string-array>
+    <string name="setting_audio_cushion_ms">Звуковой буфер (мс)</string>
+    <string name="setting_audio_cushion_ms_desc">Запас для сглаживания сбоев сети и обработки звука: меньше — меньше задержка, больше — реже щелчки и пропадания звука</string>
+    <string name="setting_oboe_buffer_frames">Выходной буфер звука (кадры)</string>
+    <string name="setting_oboe_buffer_frames_desc">Запас между программой и звуковым устройством, только для сглаживания нагрузки на процессор. Оставьте 0 для автоматического выбора.</string>
+    <string name="setting_debug_overlay">Показывать отладочную панель</string>
+    <string name="setting_debug_overlay_desc">Поверх видео показываются данные о потоке: кодек, кадры в секунду, скорость, сбои</string>
+    <string name="setting_benchmark_log">Подробный журнал</string>
+    <string name="setting_benchmark_log_desc">Записывать данные о потоке в системный журнал: кодек, кадры в секунду, скорость, сбои</string>
+
+    <!-- Отладочная панель -->
+    <string name="debug_section_video">Видео</string>
+    <string name="debug_section_audio">Звук</string>
+    <string name="debug_section_network">Сеть</string>
+    <string name="debug_video">%1$s %2$s</string>
+    <string name="debug_fps_bitrate">Кадров/с: %1$d  Скорость: %2$s</string>
+    <string name="debug_frames_drops">Кадры: %1$d  Пропущено: %2$d</string>
+    <string name="debug_jitter">Дрожание: %1$s</string>
+    <string name="debug_audio">%1$s  Телевизор: %2$d%%  Телефон: %3$d%%</string>
+    <string name="debug_audio_buffer">Буфер: %1$d мс (цель: %2$d мс)</string>
+    <string name="debug_audio_glitch">Сбои: trim=%1$d drop=%2$d sil=%3$d ur=%4$d xrun=%5$d</string>
+    <string name="debug_audio_decode">Декодер: %1$s</string>
+    <string name="debug_clients">Подключено устройств: %1$d</string>
+
+    <!-- Уведомление: запасной способ открыть экран из фона -->
+    <string name="notification_prev">Предыдущий</string>
+    <string name="notification_pause">Пауза</string>
+    <string name="notification_next">Следующий</string>
+    <string name="notification_open_channel">Открытие экрана</string>
+    <string name="notification_open_title">AirSpoon готов</string>
+    <string name="notification_open_text">Нажмите, чтобы открыть экран ожидания</string>
+
+    <!-- Экран ожидания (телевизор) -->
+    <string name="waiting_choose_title">Выберите на телефоне или компьютере:</string>
+    <string name="waiting_howto_ios">iPhone и iPad: Пункт управления → Повтор экрана → %1$s</string>
+    <string name="waiting_howto_mac">Mac: Пункт управления → Повтор экрана → %1$s</string>
+    <string name="waiting_howto_windows">Windows: программа AirSpoon Sender → %1$s</string>
+    <string name="waiting_ip">IP-адрес: %1$s</string>
+
+    <!-- Настройки: имя и экран после загрузки -->
+    <string name="setting_server_name_hint">Это имя вы увидите на телефоне или компьютере. Не длиннее 20 знаков</string>
+    <string name="setting_show_on_boot">Показывать экран после включения приставки</string>
+    <string name="setting_show_on_boot_desc">После загрузки приставки сразу открывается экран ожидания</string>
+    <string name="overlay_settings_unavailable_title">Разрешение выдаётся с компьютера</string>
+    <string name="overlay_settings_unavailable">На этом телевизоре нет экрана для разрешения «Поверх других окон». Выдайте его с компьютера при установке: команда adb shell appops set app.airspoon.tv SYSTEM_ALERT_WINDOW allow (см. README).</string>
+    <string name="overlay_settings_app_info">Открыт экран приложения. Если в нём нет пункта «Поверх других окон», выдайте разрешение с компьютера: команда adb shell appops set app.airspoon.tv SYSTEM_ALERT_WINDOW allow (см. README).</string>
+    <string name="notification_waiting_network_title">AirSpoon ждёт сеть</string>
+    <string name="notification_waiting_network_text">Приём включится сам, как только телевизор подключится к Wi-Fi или кабелю</string>
+    <string name="setting_show_on_boot_no_permission">Включено, но не выдано разрешение «Поверх других окон»: вместо экрана появится уведомление. Чтобы разрешить, выключите и включите снова</string>
+
+    <!-- Нет сети и сбой запуска -->
+    <string name="start_waiting_network">Нет сети. Приём включится сам, как только телевизор подключится к Wi-Fi или кабелю</string>
+    <string name="start_error_port">Не удалось включить приём: порт %1$d недоступен, возможно, его занимает другая программа. Пробуем снова автоматически</string>
+    <string name="start_error_native">Не удалось включить приём: ошибка запуска приёмника. Пробуем снова автоматически</string>
+    <string name="waiting_network_label">Ждёт сеть</string>
+    <string name="notification_start_error_title">AirSpoon не смог включить приём</string>
+    <string name="notification_start_error_port">Порт %1$d недоступен, возможно, его занимает другая программа. Пробуем снова автоматически</string>
+    <string name="notification_start_error_native">Ошибка запуска приёмника. Пробуем снова автоматически</string>
+</resources>
