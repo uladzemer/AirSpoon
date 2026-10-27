@@ -43,7 +43,7 @@
 ## Перед первым коммитом (владелец 2026-10-26)
 - [x] (2026-10-27 применена в Android и Windows) Новая иконка — выбрана «Экран в экране» (s1, строгий стиль по сетке 8 px; исходники scratchpad/icons2/s1*.svg, Sender — зеркало). Применить: Android adaptive (фон #101418 + знак, monochrome), баннер; Windows .ico 16–256 + иконка трея (mono белая/чёрная по теме) — после окончания текущих работ
 - [~] Переименовать папку D:/github/AirLive → D:/github/AirSpoon — скрипт [rename-to-airspoon.ps1](rename-to-airspoon.ps1) (2026-10-27, запускает владелец после закрытия VS Code), передача — [handoff-2026-10-27.md](handoff-2026-10-27.md)
-- [ ] Приватный репозиторий uladzemer/AirSpoon на GitHub, первый пуш — по команде владельца (нужен `gh auth login`)
+- [x] Приватный репозиторий https://github.com/uladzemer/AirSpoon, первый пуш 2026-10-27 (c439571 + CLAUDE.md 8dcdb71). ffmpeg в репозитории как есть (решение владельца), `.syso` и `.playwright-mcp/` в .gitignore, `android/fastlane` не закоммичен (удалить вручную — у меня rm запрещён)
 
 ## Звук при показе с iPad (2026-10-27)
 - [x] Щелчки и пропадания звука — [audio-clicks.md](audio-clicks.md): ретрай декодера, плавные переходы, «запас помнит провалы Wi-Fi». Контроль на P7: 3 мин, 36 провалов Wi-Fi, 0 пропаданий
