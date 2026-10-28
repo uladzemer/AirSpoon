@@ -22,9 +22,13 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 START=$(date +%s)
+VERSION_ARG=()
+if [ -n "${AIRSPOON_VERSION:-}" ]; then
+  VERSION_ARG=("-Pairspoon.version=$AIRSPOON_VERSION")
+fi
 # Куча Gradle ограничена: у Docker Desktop по умолчанию ~2 ГБ ОЗУ. Если памяти больше — можно поднять GRADLE_XMX.
 docker run --rm -v "$MOUNT":/work -v "$VOLUME":/root/.gradle "$IMAGE" \
-  sh ./gradlew "${TASKS[@]}" --no-daemon --max-workers=2 -Pairspoon.abis="$ABIS" \
+  sh ./gradlew "${TASKS[@]}" ${VERSION_ARG[@]+"${VERSION_ARG[@]}"} --no-daemon --max-workers=2 -Pairspoon.abis="$ABIS" \
   -Pkotlin.compiler.execution.strategy=in-process \
   -Dorg.gradle.jvmargs="-Xmx${GRADLE_XMX:-1100m} -Dfile.encoding=UTF-8"
 echo ">> Gradle: $(( $(date +%s) - START )) с"

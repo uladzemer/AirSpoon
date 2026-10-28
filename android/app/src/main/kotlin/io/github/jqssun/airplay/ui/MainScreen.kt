@@ -575,6 +575,17 @@ fun MainScreen(
         )
     }
 
+    // диалог обновления приложения
+    val updateDialogState by viewModel.updateDialogState.collectAsState()
+    LaunchedEffect(videoScreen, mirroringActive) {
+        if (!videoScreen && !mirroringActive) {
+            viewModel.onReturnToWaitingScreen()
+        }
+    }
+    if (updateDialogState != null && pin == null && !mirroringActive) {
+        UpdateDialog(state = updateDialogState!!, viewModel = viewModel)
+    }
+
 }
 
 /**

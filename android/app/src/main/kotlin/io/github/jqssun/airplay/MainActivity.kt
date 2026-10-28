@@ -25,6 +25,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.ui.MainScreen
 import io.github.jqssun.airplay.ui.theme.AirPlayTheme
+import io.github.jqssun.airplay.update.UpdateDialogState
+import io.github.jqssun.airplay.update.UpdateInstaller
 import io.github.jqssun.airplay.viewmodel.LocalNetworkAccess
 import io.github.jqssun.airplay.viewmodel.MainViewModel
 import dagger.hilt.android.AndroidEntryPoint
@@ -165,6 +167,11 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         _syncLocalNetwork()
         _refreshForeground()
+        viewModel.checkForUpdates()
+        val updateState = viewModel.updateDialogState.value
+        if (updateState is UpdateDialogState.PermissionRequired && UpdateInstaller.canRequestPackageInstalls(this)) {
+            viewModel.onUpdatePermissionGranted(this, updateState.apkFile)
+        }
     }
 
     fun enterPip() {

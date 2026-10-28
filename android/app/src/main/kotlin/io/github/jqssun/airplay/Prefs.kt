@@ -88,6 +88,9 @@ object Prefs {
     val SERVER_PORT = int("server_port", 7000, 1..65535, restart = true)
     val AUTO_START = bool("auto_start", true)
     val BOOT_AUTO_START = bool("boot_auto_start", true)
+    val CHECK_UPDATES = bool("check_updates", true)
+    // Время последней проверки обновлений (ms epoch), не входит в Prefs.all
+    const val KEY_LAST_UPDATE_CHECK_MS = "last_update_check_ms"
     // после загрузки приставки открывать экран ожидания (нужно разрешение «Поверх других окон»,
     // иначе вместо этого показывается полноэкранное уведомление)
     val SHOW_ON_BOOT = bool("show_on_boot", true)

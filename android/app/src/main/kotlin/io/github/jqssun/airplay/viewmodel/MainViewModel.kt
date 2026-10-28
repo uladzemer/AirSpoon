@@ -18,6 +18,10 @@ import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.service.AirPlayService.ServerState
 import io.github.jqssun.airplay.service.AirPlayService.StartError
 import io.github.jqssun.airplay.service.AirPlayService.StartIssue
+import io.github.jqssun.airplay.update.ReleaseInfo
+import io.github.jqssun.airplay.update.UpdateDialogState
+import io.github.jqssun.airplay.update.UpdateInstaller
+import io.github.jqssun.airplay.update.UpdateManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -84,6 +88,22 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     private val logFile = File(app.filesDir, "airplay_logs.txt")
     private var service: AirPlayService? = null
     val dacpPlayer: Player? get() = service?.dacpPlayer
+
+    val updateDialogState: StateFlow<UpdateDialogState?> = UpdateManager.dialogState
+    val isStreamingActive: Boolean get() = _videoPlaybackActive.value || _videoSessionPending.value || _mirroringActive.value
+    private var _wasStreaming = false
+
+    // Вызывается из MainActivity.onStart: приёмник живёт неделями, поэтому проверяем
+    // при каждом возврате на экран (не чаще раза в сутки, см. UpdateManager).
+    fun checkForUpdates() = UpdateManager.checkForUpdates(getApplication(), isSessionActive = { isStreamingActive })
+
+    fun onUpdateNow(context: Context, release: ReleaseInfo) = UpdateManager.startDownload(context, release)
+    fun onUpdateLater() = UpdateManager.onUserDismiss()
+    fun onUpdateCancelDownload() = UpdateManager.cancelDownload()
+    fun onUpdateOpenSettings(context: Context) = UpdateInstaller.openInstallPermissionSettings(context)
+    fun onUpdatePermissionGranted(context: Context, apkFile: File) = UpdateManager.onInstallWithPermission(context, apkFile)
+    fun onUpdateDismissError() = UpdateManager.onUserDismiss()
+    fun onReturnToWaitingScreen() = UpdateManager.onReturnToWaitingScreen()
 
     fun audioScanBegin(forward: Boolean) {
         service?.dacpController?.let { if (forward) it.beginFastForward() else it.beginRewind() }
@@ -437,6 +457,12 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
             if (pref(Prefs.DEBUG_ENABLED).value) {
                 _debugInfo.value = it.collectDebugInfo()
             }
+
+            val isStreaming = videoActive || it.videoSessionPending() || it.mirroringActive.value
+            if (_wasStreaming && !isStreaming) {
+                UpdateManager.onReturnToWaitingScreen()
+            }
+            _wasStreaming = isStreaming
         }
     }
 

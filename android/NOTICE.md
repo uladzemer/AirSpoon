@@ -48,3 +48,4 @@ AirSpoon для Android TV (каталог `android/`) — форк проект
   (`timeline_buffer.h`, `audio_decoder.h`, `audio_engine.cpp`); диагностика провалов приёма
   и повторных запросов в UxPlay `raop_buffer.c`/`raop_rtp.c` (справочный патч `0010-…`).
 - Отладочный ключ подписи `docker/debug.keystore` (общий, не секретный), имя темы `Theme.AirSpoon`, файлы скачанных видео `AirSpoon_*.mp4`, ограничение имени приёмника 20 знаками.
+- Проверка и установка обновлений из GitHub Releases (пакет `io.github.jqssun.airplay.update`, настройка «Проверять обновления», установка через PackageInstaller).

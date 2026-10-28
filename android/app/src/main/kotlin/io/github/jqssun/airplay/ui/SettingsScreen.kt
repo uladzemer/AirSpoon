@@ -57,6 +57,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val usbOnly by viewModel.pref(Prefs.USB_ONLY).collectAsState()
     val autoStart by viewModel.pref(Prefs.AUTO_START).collectAsState()
     val bootAutoStart by viewModel.pref(Prefs.BOOT_AUTO_START).collectAsState()
+    val checkUpdates by viewModel.pref(Prefs.CHECK_UPDATES).collectAsState()
     val runInBackground by viewModel.pref(Prefs.RUN_IN_BACKGROUND).collectAsState()
     val serverPort by viewModel.pref(Prefs.SERVER_PORT).collectAsState()
     val audioLatencyMs by viewModel.pref(Prefs.AUDIO_LATENCY_MS).collectAsState()
@@ -116,6 +117,13 @@ fun SettingsScreen(viewModel: MainViewModel) {
             description = stringResource(R.string.setting_run_in_background_desc),
             checked = runInBackground,
             onCheckedChange = { viewModel.set(Prefs.RUN_IN_BACKGROUND, it) }
+        )
+
+        SettingSwitch(
+            title = stringResource(R.string.setting_check_updates),
+            description = stringResource(R.string.setting_check_updates_desc),
+            checked = checkUpdates,
+            onCheckedChange = { viewModel.set(Prefs.CHECK_UPDATES, it) }
         )
 
         SectionHeader(stringResource(R.string.section_connection))

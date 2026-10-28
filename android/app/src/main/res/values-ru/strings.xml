@@ -236,4 +236,19 @@
     <string name="notification_start_error_title">AirSpoon не смог включить приём</string>
     <string name="notification_start_error_port">Порт %1$d недоступен, возможно, его занимает другая программа. Пробуем снова автоматически</string>
     <string name="notification_start_error_native">Ошибка запуска приёмника. Пробуем снова автоматически</string>
+
+    <!-- Обновления -->
+    <string name="setting_check_updates">Проверять обновления</string>
+    <string name="setting_check_updates_desc">Раз в сутки смотреть, не вышла ли новая версия на GitHub</string>
+    <string name="update_dialog_title">Обновление AirSpoon</string>
+    <string name="update_dialog_message">Вышла новая версия AirSpoon Receiver %1$s</string>
+    <string name="btn_update">Обновить</string>
+    <string name="btn_later">Позже</string>
+    <string name="btn_cancel">Отмена</string>
+    <string name="update_downloading">Скачивание обновления: %1$d%%</string>
+    <string name="update_install_permission_title">Разрешение на установку</string>
+    <string name="update_install_permission_desc">Разрешите AirSpoon устанавливать приложения</string>
+    <string name="update_error_title">Сбой обновления</string>
+    <string name="update_download_failed">Не удалось скачать обновление</string>
+    <string name="update_install_failed">Не удалось установить обновление</string>
 </resources>

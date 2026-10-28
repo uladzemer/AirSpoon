@@ -16,6 +16,23 @@ val localProps = Properties().apply {
 val allAbis = (findProperty("airspoon.abis") as String? ?: "armeabi-v7a")
     .split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
+val rawVersion = findProperty("airspoon.version") as String?
+val (appVersionName, appVersionCode, updateCheck) = if (rawVersion != null) {
+    val trimmed = rawVersion.trim()
+    val match = Regex("""^(\d+)\.(\d+)\.(\d+)$""").matchEntire(trimmed)
+        ?: throw GradleException("Invalid airspoon.version: '$rawVersion'. Expected format X.Y.Z")
+    val x = match.groupValues[1].toInt()
+    val y = match.groupValues[2].toInt()
+    val z = match.groupValues[3].toInt()
+    if (y >= 100 || z >= 100) {
+        throw GradleException("Invalid airspoon.version: '$rawVersion'. Y and Z must be < 100.")
+    }
+    val code = x * 10000 + y * 100 + z
+    Triple(trimmed, code, true)
+} else {
+    Triple("0.1.0", 1, false)
+}
+
 android {
     namespace = "io.github.jqssun.airplay"
     compileSdk = 37
@@ -47,8 +64,9 @@ android {
         applicationId = "app.airspoon.tv"
         minSdk = 23
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0" // основа: upstream 0.0.36
+        versionCode = appVersionCode
+        versionName = appVersionName
+        buildConfigField("boolean", "UPDATE_CHECK", "$updateCheck")
 
         externalNativeBuild {
             cmake {
@@ -101,6 +119,7 @@ android {
     buildFeatures {
         compose = true
         prefab = true
+        buildConfig = true
     }
 }
 
@@ -137,4 +156,5 @@ dependencies {
     implementation(libs.hilt.navigation.compose)
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 }

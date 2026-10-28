@@ -236,4 +236,19 @@
     <string name="notification_start_error_title">AirSpoon could not start reception</string>
     <string name="notification_start_error_port">Port %1$d is unavailable, it may be used by another app. Trying again automatically</string>
     <string name="notification_start_error_native">The receiver failed to initialize. Trying again automatically</string>
+
+    <!-- Updates -->
+    <string name="setting_check_updates">Check updates</string>
+    <string name="setting_check_updates_desc">Check GitHub once a day for new releases</string>
+    <string name="update_dialog_title">AirSpoon Receiver update</string>
+    <string name="update_dialog_message">AirSpoon Receiver %1$s is available</string>
+    <string name="btn_update">Update</string>
+    <string name="btn_later">Later</string>
+    <string name="btn_cancel">Cancel</string>
+    <string name="update_downloading">Downloading update: %1$d%%</string>
+    <string name="update_install_permission_title">Install permission</string>
+    <string name="update_install_permission_desc">Allow AirSpoon to install apps to proceed with update</string>
+    <string name="update_error_title">Update failed</string>
+    <string name="update_download_failed">Could not download the update</string>
+    <string name="update_install_failed">Could not install the update</string>
 </resources>
