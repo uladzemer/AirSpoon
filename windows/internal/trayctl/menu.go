@@ -8,13 +8,15 @@ import (
 
 // Тексты меню (все по-русски, короткие и понятные).
 const (
-	TextHeader    = "Показать экран на телевизоре:"
-	TextNoDevices = "Телевизоры не найдены. Проверьте, что телевизор включён и в той же сети Wi‑Fi"
-	TextStop      = "■ Остановить показ"
-	TextAddress   = "Подключить по адресу…"
-	TextAudio     = "Звук с компьютера"
-	TextReport    = "Сохранить отчёт для поддержки"
-	TextExit      = "Выход"
+	TextHeader       = "Показать экран на телевизоре:"
+	TextNoDevices    = "Телевизоры не найдены. Проверьте, что телевизор включён и в той же сети Wi‑Fi"
+	TextStop         = "■ Остановить показ"
+	TextAddress      = "Подключить по адресу…"
+	TextAudio        = "Звук с компьютера"
+	TextCheckUpdates = "Проверять обновления"
+	TextUpdatePrefix = "Обновить до версии "
+	TextReport       = "Сохранить отчёт для поддержки"
+	TextExit         = "Выход"
 )
 
 // ItemKind — вид пункта меню.
@@ -25,10 +27,12 @@ const (
 	ItemDevice
 	ItemNone // «телевизоры не найдены»
 	ItemStop
+	ItemUpdate // «Обновить до версии X.Y.Z»
 	ItemSeparator
 	ItemAddress
 	ItemAudio
-	ItemReport // «Сохранить отчёт для поддержки»
+	ItemCheckUpdates // «Проверять обновления»
+	ItemReport       // «Сохранить отчёт для поддержки»
 	ItemExit
 )
 
@@ -80,11 +84,22 @@ func (c *Controller) Menu() []MenuItem {
 	if s.Phase != Idle {
 		items = append(items, MenuItem{Kind: ItemStop, Text: TextStop, Action: c.Stop})
 	}
+	if s.AvailableUpdate != "" {
+		items = append(items, MenuItem{
+			Kind:   ItemUpdate,
+			Text:   TextUpdatePrefix + s.AvailableUpdate,
+			Action: c.applyUpdate,
+		})
+	}
 	items = append(items,
 		MenuItem{Kind: ItemSeparator},
 		MenuItem{Kind: ItemAddress, Text: TextAddress, Action: c.promptAddress},
 		MenuItem{Kind: ItemAudio, Text: TextAudio, Checked: s.Audio, Action: func() { c.SetAudio(!s.Audio) }},
 	)
+	if c.updater != nil { // в сборках "dev" проверки нет — и галочки тоже
+		items = append(items, MenuItem{Kind: ItemCheckUpdates, Text: TextCheckUpdates, Checked: s.CheckUpdates,
+			Action: func() { c.SetCheckUpdates(!s.CheckUpdates) }})
+	}
 	if c.cfg.SupportReport != nil {
 		items = append(items, MenuItem{Kind: ItemReport, Text: TextReport, Action: c.cfg.SupportReport})
 	}

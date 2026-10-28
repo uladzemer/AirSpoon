@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -30,11 +31,13 @@ import (
 const (
 	envChild     = "AIRSPOON_CHILD"     // «я — рабочий процесс под присмотром»
 	envRestarted = "AIRSPOON_RESTARTED" // сколько раз программу уже перезапускали после аварий
+	envUpdated   = "AIRSPOON_UPDATED"   // версия, до которой программа была обновлена
 
 	// Коды выхода рабочего процесса: 0 — обычный выход, 1 — показана ошибка
 	// запуска (перезапускать нечего), exitCrash — перехваченная авария.
 	exitCrash = 3
 	// exitRestartGPU (4, см. gpu.go) — просьба перезапустить программу: не авария.
+	exitUpdate = 5 // просьба завершить процесс для применения обновления: не авария.
 
 	maxCrashes  = 3                // столько аварий подряд за crashWindow — и перезапуски прекращаются
 	crashWindow = 10 * time.Minute // окно подсчёта
@@ -101,7 +104,7 @@ func waitPreflight(cmd *exec.Cmd, timeout time.Duration) bool {
 // по воле человека или Windows. Код 1 дают «Завершить задачу» и taskkill /F.
 func isCrashExit(code uint32) bool {
 	switch code {
-	case 0, 1, exitRestartGPU, statusControlCExit:
+	case 0, 1, exitRestartGPU, exitUpdate, statusControlCExit:
 		return false
 	}
 	return true
@@ -151,7 +154,7 @@ func appendLog(format string, args ...any) {
 
 // supervise запускает рабочий процесс и перезапускает его после аварий.
 // Возвращает код выхода программы.
-func supervise() int {
+func supervise(releaseMutex func()) int {
 	exe, err := os.Executable()
 	if err != nil {
 		appendLog("присмотр за программой отключён (путь к файлу не определён: %v)", err)
@@ -208,6 +211,20 @@ func supervise() int {
 			appendLog("перезапуск программы для работы на другой видеокарте (проработала %v)", time.Since(started).Round(time.Second))
 			continue
 		}
+		if code == exitUpdate {
+			// Рабочий процесс обновил exe и попросил перезапуск: освобождаем
+			// мьютекс одного экземпляра и запускаем exe заново как отдельный
+			// процесс (обычный запуск, без envChild) с AIRSPOON_UPDATED=<версия>.
+			appendLog("программа обновлена; перезапуск отдельным процессом")
+			if releaseMutex != nil {
+				releaseMutex()
+			}
+			if err := startUpdated(); err != nil {
+				appendLog("не удалось запустить обновлённый процесс (%v); программа завершена", err)
+				return 1
+			}
+			return 0
+		}
 		if !isCrashExit(code) {
 			return int(code)
 		}
@@ -227,6 +244,55 @@ func supervise() int {
 		time.Sleep(restartWait)
 		restarts++
 	}
+}
+
+// startUpdated запускает заменённый exe обычным процессом (без envChild) с
+// AIRSPOON_UPDATED=<версия>: новый экземпляр дождётся мьютекса и сообщит об обновлении.
+func startUpdated() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	ver := takeUpdateVersion()
+	if ver == "" {
+		ver = "latest"
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(filterEnv(os.Environ(), envChild), envUpdated+"="+ver)
+	return cmd.Start()
+}
+
+func filterEnv(env []string, removeKey string) []string {
+	prefix := removeKey + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func updateVersionPath() string {
+	return filepath.Join(filepath.Dir(applog.DefaultPath()), "update-version")
+}
+
+func saveUpdateVersion(ver string) error {
+	path := updateVersionPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(ver), 0o600)
+}
+
+func takeUpdateVersion() string {
+	path := updateVersionPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	_ = os.Remove(path)
+	return strings.TrimSpace(string(data))
 }
 
 // newKillOnCloseJob создаёт задание Windows, которое убивает все свои процессы,

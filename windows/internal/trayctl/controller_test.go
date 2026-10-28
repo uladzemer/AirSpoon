@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"airspoon/internal/update"
 )
 
 // --- заглушки окружения ---
@@ -217,6 +219,105 @@ func TestMenuWithoutDevices(t *testing.T) {
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("меню:\n%q\nожидалось:\n%q", got, want)
+	}
+}
+
+func TestMenuCheckUpdatesToggle(t *testing.T) {
+	var saved atomic.Bool
+	e := newEnv(t, func(cfg *Config) {
+		cfg.CheckUpdates = true
+		cfg.SaveCheckUpdates = func(on bool) {
+			saved.Store(on)
+		}
+		// Галочка есть только там, где проверка возможна (не "dev").
+		cfg.Version = "0.1.0"
+		cfg.CheckUpdate = func(context.Context, string) (update.Release, bool, error) {
+			return update.Release{}, false, nil
+		}
+	})
+
+	menu := e.ctl.Menu()
+	var checkItem *MenuItem
+	for i := range menu {
+		if menu[i].Kind == ItemCheckUpdates {
+			checkItem = &menu[i]
+			break
+		}
+	}
+	if checkItem == nil {
+		t.Fatal("пункт «Проверять обновления» не найден в меню")
+	}
+	if !checkItem.Checked {
+		t.Error("ожидалось Checked = true")
+	}
+
+	// Переключаем
+	checkItem.Action()
+	if saved.Load() != false {
+		t.Error("SaveCheckUpdates не получил false")
+	}
+	if e.ctl.Snapshot().CheckUpdates != false {
+		t.Error("в Snapshot() CheckUpdates должен быть false")
+	}
+
+	// Проверяем обновлённое меню
+	menu = e.ctl.Menu()
+	for i := range menu {
+		if menu[i].Kind == ItemCheckUpdates {
+			checkItem = &menu[i]
+			break
+		}
+	}
+	if checkItem.Checked {
+		t.Error("после переключения Checked должен быть false")
+	}
+}
+
+func TestMenuUpdateAvailableItem(t *testing.T) {
+	var installed atomic.Bool
+	var installedRel update.Release
+	e := newEnv(t, func(cfg *Config) {
+		cfg.InstallUpdate = func(rel update.Release) {
+			installed.Store(true)
+			installedRel = rel
+		}
+	})
+
+	rel := update.Release{TagName: "v0.3.0", Version: "0.3.0"}
+	e.ctl.SetAvailableUpdate(rel)
+
+	menu := e.ctl.Menu()
+	var updateItem *MenuItem
+	for i := range menu {
+		if menu[i].Kind == ItemUpdate {
+			updateItem = &menu[i]
+			break
+		}
+	}
+	if updateItem == nil {
+		t.Fatal("пункт «Обновить до версии 0.3.0» не найден в меню")
+	}
+	wantText := "Обновить до версии 0.3.0"
+	if updateItem.Text != wantText {
+		t.Errorf("текст пункта: got %q, want %q", updateItem.Text, wantText)
+	}
+
+	// Вызываем действие
+	updateItem.Action()
+	if !installed.Load() {
+		t.Fatal("InstallUpdate не был вызван")
+	}
+	if installedRel.Version != "0.3.0" {
+		t.Errorf("версия в InstallUpdate: %q", installedRel.Version)
+	}
+
+	// Очищаем доступное обновление
+	e.ctl.ClearAvailableUpdate()
+	menu = e.ctl.Menu()
+	for i := range menu {
+		if menu[i].Kind == ItemUpdate {
+			t.Fatal("пункт обновления не должен присутствовать после ClearAvailableUpdate")
+		}
 	}
 }
 

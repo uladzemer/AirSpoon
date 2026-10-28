@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Окна ввода (код с экрана телевизора, адрес) — свои окна Win32 с крупным
@@ -433,4 +435,12 @@ func dialogWndProc(hwnd, m, wParam, lParam uintptr) uintptr {
 		return 0
 	}
 	return defWindowProc(hwnd, uint32(m), wParam, lParam)
+}
+
+// Confirm спрашивает у пользователя подтверждение Да/Нет окном сообщения в стиле окон программы.
+// Возвращает true, если нажата кнопка «Да».
+func Confirm(title, text string) bool {
+	r, _ := windows.MessageBox(0, windows.StringToUTF16Ptr(text), windows.StringToUTF16Ptr(title),
+		windows.MB_YESNO|windows.MB_ICONQUESTION|windows.MB_TOPMOST|windows.MB_SETFOREGROUND)
+	return r == idYes
 }

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"airspoon/internal/update"
 )
 
 // AppName — название программы в заголовках уведомлений и подсказке значка.
@@ -134,6 +136,20 @@ type Config struct {
 
 	// Audio — передавать ли звук компьютера (по умолчанию включено у вызывающего).
 	Audio bool
+	// Version — текущая версия программы ("dev", "0.2.0").
+	Version string
+	// CheckUpdates — включена ли проверка обновлений по умолчанию.
+	CheckUpdates bool
+	// SaveCheckUpdates сохраняет настройку «Проверять обновления».
+	SaveCheckUpdates func(bool)
+	// CheckUpdate — функция запроса последнего релиза (nil — стандартная через update.Check).
+	CheckUpdate UpdateCheckFunc
+	// InstallUpdate — действие при выборе пункта меню «Обновить до версии X.Y.Z».
+	InstallUpdate func(rel update.Release)
+	// InitialUpdateDelay — пауза перед первой проверкой обновлений.
+	InitialUpdateDelay time.Duration
+	// UpdateInterval — пауза между проверками обновлений.
+	UpdateInterval time.Duration
 	// SupportReport — действие пункта меню «Сохранить отчёт для поддержки»; nil —
 	// пункта нет. Вызывается из потока меню и не должно блокировать его надолго.
 	SupportReport func()
@@ -159,19 +175,23 @@ type Config struct {
 type Controller struct {
 	cfg Config
 
-	mu       sync.Mutex
-	phase    Phase
-	current  *Device
-	devices  []Device
-	misses   map[string]int
-	audio    bool
-	cancel   context.CancelFunc // остановка текущего показа
-	done     chan struct{}      // закрывается, когда последняя горутина показа завершилась
-	runID    int
-	lastAddr string
-	base     context.Context
-	stopAll  context.CancelFunc
-	refresh  chan struct{}
+	mu              sync.Mutex
+	phase           Phase
+	current         *Device
+	devices         []Device
+	misses          map[string]int
+	audio           bool
+	checkUpdates    bool
+	availableUpdate string
+	availableRel    update.Release
+	updater         *Updater
+	cancel          context.CancelFunc // остановка текущего показа
+	done            chan struct{}      // закрывается, когда последняя горутина показа завершилась
+	runID           int
+	lastAddr        string
+	base            context.Context
+	stopAll         context.CancelFunc
+	refresh         chan struct{}
 }
 
 // New создаёт контроллер; поиск телевизоров начинается после Start.
@@ -197,14 +217,36 @@ func New(cfg Config) *Controller {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	return &Controller{
-		cfg:     cfg,
-		audio:   cfg.Audio,
-		misses:  map[string]int{},
-		refresh: make(chan struct{}, 1),
-		base:    context.Background(),
-		stopAll: func() {},
+	c := &Controller{
+		cfg:          cfg,
+		audio:        cfg.Audio,
+		checkUpdates: cfg.CheckUpdates,
+		misses:       map[string]int{},
+		refresh:      make(chan struct{}, 1),
+		base:         context.Background(),
+		stopAll:      func() {},
 	}
+	if cfg.CheckUpdate != nil || (cfg.Version != "" && cfg.Version != "dev") {
+		checkFunc := cfg.CheckUpdate
+		if checkFunc == nil {
+			checkFunc = func(ctx context.Context, cur string) (update.Release, bool, error) {
+				return update.Check(ctx, nil, update.DefaultAPIURL, cur)
+			}
+		}
+		c.updater = NewUpdater(UpdaterConfig{
+			Version: cfg.Version,
+			Check:   checkFunc,
+			Enabled: func() bool { return c.Snapshot().CheckUpdates },
+			Notify:  cfg.UI.Notify,
+			// Во время показа уведомление было бы видно на телевизоре.
+			Busy:         func() bool { return c.Snapshot().Phase != Idle },
+			OnUpdate:     c.SetAvailableUpdate,
+			Logf:         cfg.Logf,
+			InitialDelay: cfg.InitialUpdateDelay,
+			Interval:     cfg.UpdateInterval,
+		})
+	}
+	return c
 }
 
 // Start запускает фоновый поиск телевизоров; он идёт, пока жив ctx или не вызван Shutdown.
@@ -212,23 +254,35 @@ func (c *Controller) Start(ctx context.Context) {
 	c.mu.Lock()
 	c.base, c.stopAll = context.WithCancel(ctx)
 	base := c.base
+	updater := c.updater
 	c.mu.Unlock()
 	go c.discoverLoop(base)
+	if updater != nil {
+		go updater.Run(base)
+	}
 }
 
 // Snapshot — копия состояния для интерфейса.
 type Snapshot struct {
-	Phase   Phase
-	Current *Device
-	Devices []Device
-	Audio   bool
+	Phase           Phase
+	Current         *Device
+	Devices         []Device
+	Audio           bool
+	CheckUpdates    bool
+	AvailableUpdate string
 }
 
 // Snapshot возвращает текущее состояние.
 func (c *Controller) Snapshot() Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Snapshot{Phase: c.phase, Audio: c.audio, Devices: append([]Device(nil), c.devices...)}
+	s := Snapshot{
+		Phase:           c.phase,
+		Audio:           c.audio,
+		CheckUpdates:    c.checkUpdates,
+		AvailableUpdate: c.availableUpdate,
+		Devices:         append([]Device(nil), c.devices...),
+	}
 	if c.current != nil {
 		d := *c.current
 		s.Current = &d
@@ -326,6 +380,55 @@ func (c *Controller) SetAudio(on bool) {
 	c.cfg.UI.Changed()
 	if active {
 		c.Select(d)
+	}
+}
+
+// SetCheckUpdates включает или выключает проверку обновлений. Выключение
+// убирает найденное обновление из меню, включение сразу проверяет релиз.
+func (c *Controller) SetCheckUpdates(on bool) {
+	c.mu.Lock()
+	c.checkUpdates = on
+	save := c.cfg.SaveCheckUpdates
+	updater, base := c.updater, c.base
+	c.mu.Unlock()
+	if save != nil {
+		save(on)
+	}
+	if !on {
+		c.ClearAvailableUpdate()
+		return
+	}
+	c.cfg.UI.Changed()
+	if updater != nil {
+		go updater.CheckOnce(base)
+	}
+}
+
+// SetAvailableUpdate выставляет доступное для установки обновление.
+func (c *Controller) SetAvailableUpdate(rel update.Release) {
+	c.mu.Lock()
+	c.availableUpdate = rel.Version
+	c.availableRel = rel
+	c.mu.Unlock()
+	c.cfg.UI.Changed()
+}
+
+// ClearAvailableUpdate сбрасывает найденное обновление.
+func (c *Controller) ClearAvailableUpdate() {
+	c.mu.Lock()
+	c.availableUpdate = ""
+	c.availableRel = update.Release{}
+	c.mu.Unlock()
+	c.cfg.UI.Changed()
+}
+
+func (c *Controller) applyUpdate() {
+	c.mu.Lock()
+	act := c.cfg.InstallUpdate
+	rel := c.availableRel
+	c.mu.Unlock()
+	if act != nil {
+		act(rel)
 	}
 }
 

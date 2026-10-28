@@ -85,7 +85,8 @@ func AcquireSingleInstance() (release func(), first bool, err error) {
 		return func() {}, false, err
 	}
 	first = !errors.Is(err, windows.ERROR_ALREADY_EXISTS)
-	return func() { _ = windows.CloseHandle(h) }, first, nil
+	var once sync.Once
+	return func() { once.Do(func() { _ = windows.CloseHandle(h) }) }, first, nil
 }
 
 // SignalRunning просит уже запущенный экземпляр показать меню. Возвращает

@@ -66,12 +66,21 @@ if (-not $SkipTests) {
 
 Step 'Сборка bin\AirSpoonSender.exe'
 New-Item -ItemType Directory -Force -Path bin | Out-Null
-go build -trimpath -ldflags '-H windowsgui -s -w' -o bin\AirSpoonSender.exe ./cmd/airspoon
+$version = 'dev'
+if ($env:AIRSPOON_VERSION -and $env:AIRSPOON_VERSION.Trim() -ne '') {
+    $v = $env:AIRSPOON_VERSION.Trim()
+    if ($v -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Неверный формат переменной окружения AIRSPOON_VERSION: '$v'. Требуется формат X.Y.Z (например, 0.2.0)."
+    }
+    $version = $v
+}
+$senderLdflags = "-H windowsgui -s -w -X main.version=$version"
+go build -trimpath -ldflags $senderLdflags -o bin\AirSpoonSender.exe ./cmd/airspoon
 Check 'Сборка AirSpoonSender.exe'
 go build -trimpath -o bin\testreceiver.exe ./cmd/testreceiver
 Check 'Сборка testreceiver.exe'
 if ($TestHooks) {
-    go build -trimpath -tags testhooks -ldflags '-H windowsgui -s -w' -o bin\AirSpoonSender.testhooks.exe ./cmd/airspoon
+    go build -trimpath -tags testhooks -ldflags $senderLdflags -o bin\AirSpoonSender.testhooks.exe ./cmd/airspoon
     Check 'Сборка AirSpoonSender.testhooks.exe'
 }
 

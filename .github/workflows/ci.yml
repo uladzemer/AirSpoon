@@ -44,7 +44,10 @@ jobs:
       # Тесты сами пропускаются (t.Skip), если на раннере нет монитора/GPU/кодеров.
       - name: Сборка и тесты (build.ps1)
         shell: pwsh
-        run: pwsh -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1
+        # Сборка по тегу vX.Y.Z получает версию X.Y.Z (по ней программа ищет обновления).
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:AIRSPOON_VERSION = $env:GITHUB_REF_NAME -replace '^v', '' }
+          pwsh -NoProfile -ExecutionPolicy Bypass -File windows/build.ps1
 
       - name: Проверка результата
         shell: pwsh
@@ -109,6 +112,7 @@ jobs:
       - name: Тесты и сборка (build.sh)
         run: |
           mkdir -p "$VOLUME"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then export AIRSPOON_VERSION="${GITHUB_REF_NAME#v}"; fi
           bash android/docker/build.sh testDebugUnitTest assembleDebug
 
       # Контейнер работал от root: вернуть файлы текущему пользователю, чтобы кэш и артефакты читались.

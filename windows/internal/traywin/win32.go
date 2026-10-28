@@ -199,6 +199,8 @@ const (
 
 	idOK     = 1
 	idCancel = 2
+	idYes    = 6
+	idNo     = 7
 
 	mbIconInfo = 0x40
 
