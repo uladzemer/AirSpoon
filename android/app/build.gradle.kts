@@ -39,14 +39,29 @@ android {
     ndkVersion = "27.0.12077973"
 
     signingConfigs {
-        // Отладочный ключ лежит в репозитории (docker/debug.keystore, пароль android, не секрет):
+        // Ключ AirSpoon (секрет, вне репозитория): build.sh передаёт путь и пароль через
+        // AIRSPOON_KEYSTORE / AIRSPOON_KEYSTORE_PASSWORD — в CI из секретов GitHub, на ПК
+        // владельца из %USERPROFILE%\.airspoon. Им подписаны релизы, и обновление с GitHub
+        // встаёт только поверх APK с той же подписью.
+        // Без ключа — общий отладочный (docker/debug.keystore, пароль android, не секрет):
         // подпись одинакова при каждой сборке, и `adb install -r` обновляет приложение без удаления
-        // (иначе пропадают настройки и выданные права). Для магазина используется ключ release ниже.
+        // (иначе пропадают настройки и выданные права), но поверх релизной сборки не встанет.
+        val airspoonKey = System.getenv("AIRSPOON_KEYSTORE")?.takeIf { it.isNotBlank() }?.let(::file)
         getByName("debug") {
-            storeFile = file("../docker/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            if (airspoonKey != null) {
+                if (!airspoonKey.exists()) throw GradleException("AIRSPOON_KEYSTORE not found: $airspoonKey")
+                val pw = System.getenv("AIRSPOON_KEYSTORE_PASSWORD")
+                    ?: throw GradleException("AIRSPOON_KEYSTORE_PASSWORD is not set")
+                storeFile = airspoonKey
+                storePassword = pw
+                keyAlias = "airspoon"
+                keyPassword = pw
+            } else {
+                storeFile = file("../docker/debug.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
         if (localProps.containsKey("storeFile")) {
             create("release") {

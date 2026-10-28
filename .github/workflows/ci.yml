@@ -108,12 +108,28 @@ jobs:
             gradle-${{ runner.os }}-
 
       # Модульные тесты, сборка debug-APK (armeabi-v7a) и проверка APK (verify-apk.sh).
-      # Подпись — общий отладочный ключ android/docker/debug.keystore, секретов нет.
+      # Подпись — ключ AirSpoon из секретов (AIRSPOON_KEYSTORE_B64, AIRSPOON_KEYSTORE_PASSWORD);
+      # без секретов (PR из форка) — общий отладочный ключ, а релиз по тегу без ключа не собирается.
       - name: Тесты и сборка (build.sh)
+        env:
+          KEYSTORE_B64: ${{ secrets.AIRSPOON_KEYSTORE_B64 }}
+          AIRSPOON_KEYSTORE_PASSWORD: ${{ secrets.AIRSPOON_KEYSTORE_PASSWORD }}
         run: |
           mkdir -p "$VOLUME"
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export AIRSPOON_KEYSTORE="$RUNNER_TEMP/release.jks"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "::error::Нет секрета AIRSPOON_KEYSTORE_B64: релиз без ключа AirSpoon не выпускаем"; exit 1
+          fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then export AIRSPOON_VERSION="${GITHUB_REF_NAME#v}"; fi
           bash android/docker/build.sh testDebugUnitTest assembleDebug
+          rm -f "$RUNNER_TEMP/release.jks"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # Релиз обязан быть подписан ключом AirSpoon (отпечаток сертификата не секрет).
+            keytool -printcert -jarfile android/out/airspoon-debug-armeabi-v7a.apk \
+              | grep -q 'SHA256: 27:6B:F0:61:BB:1C:AF:21:6D:EC:0B:AF:EF:9D:6D:46:87:60:35:E9:CB:D9:E8:0F:F8:D4:97:F9:0F:43:DA:55'
+          fi
 
       # Контейнер работал от root: вернуть файлы текущему пользователю, чтобы кэш и артефакты читались.
       - name: Права на файлы
