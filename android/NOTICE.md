@@ -26,6 +26,15 @@ AirSpoon для Android TV (каталог `android/`) — форк проект
 | `openssl-cmake` | https://github.com/viaduck/openssl-cmake | `4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8` (ветка `v3`) | MIT (`openssl-cmake/LICENSE`); сам OpenSSL 3.x (Apache License 2.0) скачивается при сборке |
 | `ffmpeg` | https://github.com/FFmpeg/FFmpeg | `38b88335f99e76ed89ff3c93f877fdefce736c13` | LGPL v2.1 и новее (`ffmpeg/LICENSE.md`); собирается без `--enable-gpl`, только декодеры ALAC и AAC |
 
+### FairPlay (`UxPlay/lib/playfair/`)
+
+Рукопожатие FairPlay SAP (без него iPhone и iPad не начинают показ экрана) делает библиотека
+**playfair**: https://github.com/EstebanKubata/playfair, автор EstebanKubata, 2015, GNU GPL v3
+(`UxPlay/lib/playfair/LICENSE.md`). В UxPlay она пришла по цепочке ShairPlay (Juho Vähä-Herttua,
+LGPL v2.1+) → RPiPlay → UxPlay. Таблицы и константы (`omg_hax.h`, `omg_hax.c`) получены авторами
+playfair обратной разработкой; как именно — не задокументировано, и UxPlay прямо пишет:
+«The legal status of that library is unclear». AirSpoon эти файлы не менял.
+
 Служебные каталоги `.git` у субмодулей и файл `.gitmodules` в копию не вошли. Файлы CI исходного
 проекта (`.github/workflows/apk.yml`) не копировались.
 

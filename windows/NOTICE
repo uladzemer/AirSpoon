@@ -87,10 +87,14 @@ AirSpoon (windows/) — передатчик экрана Windows на AirPlay-�
    cmd/airspoon/*
 
 ЗАМЕЧАНИЯ
-   * Таблицы FairPlay (fpsap*.go, fairplay_*.go) происхождение которых не
-     проверено: см. примечание в README open-airplay (doubletake #59). Для
-     личного использования допустимо; перед публичным релизом нужен отдельный
-     юридический разбор.
+   * Таблицы FairPlay (fpsap*.go, fpsap_tables.go, fairplay_*.go) пришли из
+     doubletake (п. 2) через open-airplay (п. 1) без изменений. Их
+     происхождение описано только словами автора doubletake в
+     https://github.com/omarroth/doubletake/issues/59: ранняя версия была
+     извлечена из реализации Apple, текущая — независимая обратная разработка
+     без кода Apple, кроме констант, нужных для совместимости. Независимо это
+     не проверено. Таблицы нужны только для совместимости с приёмниками
+     AirPlay.
    * Проект не связан с Apple Inc. «AirPlay» и «FairPlay» — товарные знаки Apple.
    * Зависимости (Go-модули): github.com/aead/chacha20poly1305 (MIT),
      github.com/grandcat/zeroconf (MIT), github.com/zalando/go-keyring (MIT),

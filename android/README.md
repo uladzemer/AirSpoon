@@ -3,7 +3,10 @@
 Приёмник экрана для телевизионных приставок на Android. Телефон, компьютер или планшет показывают
 своё изображение и звук на телевизоре — без проводов и без ввода кодов. Совместимо с AirPlay.
 
-Приложение не связано с Apple Inc. и не одобрено ей.
+Приложение не связано с Apple Inc. и не одобрено ей. «AirPlay» и «FairPlay» — товарные знаки Apple.
+Для рукопожатия FairPlay используется сторонняя библиотека playfair, правовой статус которой
+не определён (см. [NOTICE.md](NOTICE.md)). Если вы представляете Apple и возражаете против неё —
+напишите в [Issues](https://github.com/uladzemer/AirSpoon/issues), и мы примем меры.
 
 Это форк проекта [android-airplay-server](https://github.com/jqssun/android-airplay-server)
 (автор jqssun, лицензия GPL-3.0), который построен на [UxPlay](https://github.com/FDH2/UxPlay).
