@@ -115,12 +115,13 @@ type Capturer struct {
 	dupLogAt    time.Time
 	dupErr      error
 
-	srcW, srcH int
-	fit        Rect
-	desktop    *com.Object // последний кадр рабочего стола (BGRA)
-	composed   *com.Object // desktop + указатель
-	deskView   *com.Object
-	compView   *com.Object
+	srcW, srcH   int    // native (unrotated) surface dimensions
+	sizeRotation uint32 // rotation used by current resources/fit; may lag reopen until a frame arrives
+	fit          Rect
+	desktop      *com.Object // последний кадр рабочего стола (BGRA)
+	composed     *com.Object // desktop + указатель
+	deskView     *com.Object
+	compView     *com.Object
 
 	vp        *videoProc
 	ring      []*com.Object
@@ -136,9 +137,10 @@ type Capturer struct {
 	wantTexture   bool
 	warnedFormat  bool
 
-	shape      *CursorShape
-	curVisible bool
-	curX, curY int
+	shape        *CursorShape
+	surfaceShape *CursorShape // inverse-rotated shape, cached on shape/rotation changes
+	curVisible   bool
+	curX, curY   int
 
 	haveDesktop     bool
 	dirty           bool
@@ -223,7 +225,9 @@ func New(cfg Config) (*Capturer, error) {
 		}
 	}
 	b := found.info.Bounds
-	if err := c.ensureSize(b.W, b.H); err != nil {
+	// Output bounds are already upright; desktop textures must use native size.
+	w, h := rotatedSize(b.W, b.H, c.rotation)
+	if err := c.ensureSize(w, h); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -259,6 +263,12 @@ func (c *Capturer) HasVideoProcessor() bool { return c.vp != nil }
 func (c *Capturer) SetWantTexture(v bool) error {
 	if v && c.vp == nil {
 		return errors.New("видеопроцессор GPU недоступен: текстуры NV12 выдать нельзя")
+	}
+	if c.wantTexture && !v {
+		// Texture frames advance dataVersion without updating c.data. The slow
+		// texture-input fallback must read back the current upright frame even
+		// when the desktop (and its version) has stopped changing.
+		c.data = nil
 	}
 	c.wantTexture = v
 	return nil
@@ -317,12 +327,18 @@ func (c *Capturer) ensureSize(w, h int) error {
 	if w <= 0 || h <= 0 {
 		return fmt.Errorf("недопустимый размер рабочего стола %dx%d", w, h)
 	}
-	if c.desktop != nil && w == c.srcW && h == c.srcH {
+	if c.desktop != nil && w == c.srcW && h == c.srcH && c.sizeRotation == c.rotation {
 		return nil
 	}
 	c.releaseSize()
 	c.srcW, c.srcH = w, h
-	c.fit = FitRect(w, h, c.cfg.Width, c.cfg.Height)
+	c.sizeRotation = c.rotation
+	logicalW, logicalH := rotatedSize(w, h, c.rotation)
+	// The receiver negotiates a fixed NV12 canvas, also used by the encoder.
+	// Swap the desktop size, not that canvas: letterboxing preserves aspect
+	// through runtime orientation changes without renegotiating the stream.
+	c.fit = FitRect(logicalW, logicalH, c.cfg.Width, c.cfg.Height)
+	c.surfaceShape = rotateCursorShape(c.shape, inverseRotation(c.rotation))
 	// Некоторые драйверы (проверено на NVIDIA) не принимают в качестве входа
 	// видеопроцессора текстуру только с флагом SHADER_RESOURCE, поэтому
 	// пробуем варианты привязки по очереди.
@@ -367,7 +383,7 @@ func (c *Capturer) failVideoProcSetup(vpErr error) error {
 }
 
 func (c *Capturer) configureVP() error {
-	if err := c.vp.configure(c.srcW, c.srcH, c.cfg.Width, c.cfg.Height, c.cfg.FPS, c.fit); err != nil {
+	if err := c.vp.configure(c.srcW, c.srcH, c.cfg.Width, c.cfg.Height, c.cfg.FPS, c.fit, c.rotation); err != nil {
 		return err
 	}
 	var err error
@@ -441,7 +457,6 @@ func (c *Capturer) openDup() error {
 		return err
 	}
 	defer f.release()
-	c.noteRotation(f.info.Rotation)
 	out1, err := f.output.QueryInterface(&iidOutput1)
 	if err != nil {
 		return fmt.Errorf("IDXGIOutput1: %w", err)
@@ -453,6 +468,12 @@ func (c *Capturer) openDup() error {
 		return err
 	}
 	c.dup = dup
+	// Read the rotation belonging to this duplication, avoiding a mode-change
+	// race with the earlier output enumeration. Reopen after ACCESS_LOST does
+	// this again, even when the native surface dimensions stay unchanged.
+	var desc outduplDesc
+	dup.Call(slotDupGetDesc, uintptr(unsafe.Pointer(&desc)))
+	c.noteRotation(desc.Rotation)
 	return nil
 }
 
@@ -461,9 +482,10 @@ func (c *Capturer) noteRotation(rotation uint32) {
 		return
 	}
 	c.rotation = rotation
-	if rotation > dxgiModeRotationIdentity {
-		c.logf("Внимание: монитор %s повёрнут (DXGI Rotation=%d). Поворот изображения и курсора пока не поддерживается: изображение на телевизоре может быть повёрнуто. Выберите альбомную ориентацию экрана в параметрах Windows.", c.monitor, rotation)
-	}
+	c.curVisible = false // position from the previous orientation is stale
+	// Keep the logical shape: DXGI need not resend an unchanged pointer image.
+	// ensureSize rebuilds its inverse-rotated copy for the new surface.
+	c.surfaceShape = nil
 }
 
 // tryOpenDup вызывает openDup не чаще раза в dupRetryInterval и не засоряет лог.
@@ -641,9 +663,20 @@ func (c *Capturer) acquire(ms uint32) error {
 		res.Release()
 		c.dup.Call(slotDupReleaseFrame)
 	}()
-	if info.LastPresentTime != 0 {
+	var convertErr error
+	if info.LastPresentTime != 0 || !c.haveDesktop || c.sizeRotation != c.rotation {
 		if err := c.copyDesktop(res); err != nil {
-			return err
+			if !errors.Is(err, ErrVideoProcessor) {
+				return err
+			}
+			// A rotated mode may lack VP rotation support. The failed setup
+			// dropped the VP and reset srcW/srcH: retain this acquired desktop
+			// and its pointer metadata on the CPU path BEFORE asking the source
+			// to replace the texture encoder. Its next Grab can be a repeat.
+			convertErr = err
+			if err := c.copyDesktop(res); err != nil {
+				return err
+			}
 		}
 		c.haveDesktop = true
 		c.dirty = true
@@ -669,7 +702,7 @@ func (c *Capturer) acquire(ms uint32) error {
 		c.dirty = true
 		c.version++
 	}
-	return nil
+	return convertErr
 }
 
 func (c *Capturer) copyDesktop(res *com.Object) error {
@@ -719,6 +752,7 @@ func (c *Capturer) fetchShape(size int) {
 		return
 	}
 	c.shape = s
+	c.surfaceShape = rotateCursorShape(s, inverseRotation(c.sizeRotation))
 }
 
 // --- выдача кадров ---
@@ -802,13 +836,21 @@ func (c *Capturer) cursorRegion() (Rect, bool) {
 	if !c.cfg.ShowCursor || !c.curVisible || !c.shape.Valid() {
 		return Rect{}, false
 	}
-	w, h := c.shape.Size()
-	x0, y0 := maxInt(0, c.curX), maxInt(0, c.curY)
-	x1, y1 := minInt(c.srcW, c.curX+w), minInt(c.srcH, c.curY+h)
+	r := c.surfaceCursorRect()
+	x0, y0 := maxInt(0, r.X), maxInt(0, r.Y)
+	x1, y1 := minInt(c.srcW, r.Right()), minInt(c.srcH, r.Bottom())
 	if x1 <= x0 || y1 <= y0 {
 		return Rect{}, false
 	}
 	return Rect{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}, true
+}
+
+func (c *Capturer) surfaceCursorRect() Rect {
+	w, h := c.shape.Size()
+	// DXGI PointerPosition is the shape's top-left in upright, output-local
+	// desktop coordinates, NOT native surface coordinates or a hotspot.
+	// Do not subtract HotX/HotY or the virtual desktop monitor offset.
+	return desktopRectToSurface(Rect{X: c.curX, Y: c.curY, W: w, H: h}, c.srcW, c.srcH, c.sizeRotation)
 }
 
 func (c *Capturer) produce(now time.Time) (Frame, error) {
@@ -899,7 +941,7 @@ func (c *Capturer) produceCPU(f Frame, src *com.Object) (Frame, error) {
 		if len(c.data) != NV12Size(c.cfg.Width, c.cfg.Height) {
 			c.data = make([]byte, NV12Size(c.cfg.Width, c.cfg.Height))
 		}
-		ConvertBGRAToNV12(c.data, c.cfg.Width, c.cfg.Height, pix, int(m.RowPitch), c.srcW, c.srcH, c.fit)
+		convertRotatedBGRAToNV12(c.data, c.cfg.Width, c.cfg.Height, pix, int(m.RowPitch), c.srcW, c.srcH, c.fit, c.sizeRotation)
 		c.ctx.Call(slotCtxUnmap, uintptr(unsafe.Pointer(c.stagingFull)), 0)
 		c.dataVersion = c.version
 	}
@@ -982,7 +1024,8 @@ func (c *Capturer) composeCursor(region Rect) {
 		copy(buf[r*stride:(r+1)*stride], mem[r*int(m.RowPitch):r*int(m.RowPitch)+stride])
 	}
 	c.ctx.Call(slotCtxUnmap, uintptr(unsafe.Pointer(c.stagingCursor)), 0)
-	BlendCursor(buf, stride, region.W, region.H, c.curX-region.X, c.curY-region.Y, c.shape)
+	r := c.surfaceCursorRect()
+	BlendCursor(buf, stride, region.W, region.H, r.X-region.X, r.Y-region.Y, c.surfaceShape)
 	c.ctx.Call(slotCtxUpdateSubresource, uintptr(unsafe.Pointer(c.composed)), 0, uintptr(unsafe.Pointer(&box)),
 		uintptr(unsafe.Pointer(&buf[0])), uintptr(stride), 0)
 }

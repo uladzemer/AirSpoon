@@ -31,12 +31,20 @@ func FillBlackNV12(dst []byte, w, h int) {
 // Масштабирование — усреднение по ячейке исходника, соответствующей целевому
 // пикселю. fit должен быть чётным (см. FitRect).
 func ConvertBGRAToNV12(dst []byte, dstW, dstH int, src []byte, srcStride, srcW, srcH int, fit Rect) {
+	convertRotatedBGRAToNV12(dst, dstW, dstH, src, srcStride, srcW, srcH, fit, dxgiModeRotationIdentity)
+}
+
+// convertRotatedBGRAToNV12 rotates while sampling/scaling, before chroma
+// subsampling. fit uses the upright logical dimensions, not the native surface.
+func convertRotatedBGRAToNV12(dst []byte, dstW, dstH int, src []byte, srcStride, srcW, srcH int, fit Rect, rotation uint32) {
 	if len(dst) < NV12Size(dstW, dstH) || srcW <= 0 || srcH <= 0 || fit.W <= 0 || fit.H <= 0 {
 		return
 	}
 	if fit.X != 0 || fit.Y != 0 || fit.W != dstW || fit.H != dstH {
 		FillBlackNV12(dst, dstW, dstH)
 	}
+	base, xStep, yStep := rotatedBGRASteps(srcW, srcH, srcStride, rotation)
+	srcW, srcH = rotatedSize(srcW, srcH, rotation)
 	xs := make([]int, fit.W+1)
 	for i := range xs {
 		xs[i] = i * srcW / fit.W
@@ -65,13 +73,13 @@ func ConvertBGRAToNV12(dst []byte, dstW, dstH int, src []byte, srcStride, srcW, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			convertBand(dst, dstW, dstH, src, srcStride, fit, xs, ys, 2*p0, 2*p1)
+			convertBand(dst, dstW, dstH, src, base, xStep, yStep, fit, xs, ys, 2*p0, 2*p1)
 		}()
 	}
 	wg.Wait()
 }
 
-func convertBand(dst []byte, dstW, dstH int, src []byte, srcStride int, fit Rect, xs, ys []int, y0, y1 int) {
+func convertBand(dst []byte, dstW, dstH int, src []byte, base, xStep, yStep int, fit Rect, xs, ys []int, y0, y1 int) {
 	uvBase := dstW * dstH
 	for dy := y0; dy < y1; dy += 2 {
 		for dx := 0; dx < fit.W; dx += 2 {
@@ -89,12 +97,12 @@ func convertBand(dst []byte, dstW, dstH int, src []byte, srcStride int, fit Rect
 					}
 					var r, g, b int
 					for sy := sy0; sy < sy1; sy++ {
-						p := sy*srcStride + sx0*4
+						p := base + sy*yStep + sx0*xStep
 						for sx := sx0; sx < sx1; sx++ {
 							b += int(src[p])
 							g += int(src[p+1])
 							r += int(src[p+2])
-							p += 4
+							p += xStep
 						}
 					}
 					n := (sx1 - sx0) * (sy1 - sy0)

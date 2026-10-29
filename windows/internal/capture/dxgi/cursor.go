@@ -41,6 +41,41 @@ func (s *CursorShape) Valid() bool {
 	return false
 }
 
+// rotateCursorShape preserves color alpha, masked-color XOR and both monochrome
+// bit planes. Used with the inverse desktop rotation before composing on the
+// native surface; the final frame rotation makes the pointer upright again.
+func rotateCursorShape(s *CursorShape, rotation uint32) *CursorShape {
+	if !s.Valid() {
+		return nil
+	}
+	if rotation != dxgiModeRotation90 && rotation != dxgiModeRotation180 && rotation != dxgiModeRotation270 {
+		return s
+	}
+	w, h := s.Size()
+	rw, rh := rotatedSize(w, h, rotation)
+	r := &CursorShape{Type: s.Type, Width: rw, Height: rh, Pitch: rw * 4}
+	r.HotX, r.HotY = rotatePoint(s.HotX, s.HotY, w, h, rotation)
+	if s.Type == CursorMonochrome {
+		r.Height *= 2
+		r.Pitch = (rw + 7) / 8
+	}
+	r.Data = make([]byte, r.Pitch*r.Height)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			rx, ry := rotatePoint(x, y, w, h, rotation)
+			if s.Type == CursorMonochrome {
+				for plane := 0; plane < 2; plane++ {
+					bit := s.Data[(y+plane*h)*s.Pitch+x/8] >> (7 - uint(x%8)) & 1
+					r.Data[(ry+plane*rh)*r.Pitch+rx/8] |= bit << (7 - uint(rx%8))
+				}
+			} else {
+				copy(r.Data[ry*r.Pitch+rx*4:][:4], s.Data[y*s.Pitch+x*4:][:4])
+			}
+		}
+	}
+	return r
+}
+
 // BlendCursor рисует указатель поверх участка кадра BGRA. region — копия
 // участка рабочего стола (rw x rh пикселей, строка stride байт), (cx, cy) —
 // положение левого верхнего угла указателя относительно участка (может быть

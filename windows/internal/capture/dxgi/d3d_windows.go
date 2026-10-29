@@ -14,29 +14,28 @@ import (
 
 // Коды ошибок DXGI и Win32, которые мы различаем.
 const (
-	hrAccessLost             uint32 = 0x887A0026 // DXGI_ERROR_ACCESS_LOST
-	hrWaitTimeout            uint32 = 0x887A0027 // DXGI_ERROR_WAIT_TIMEOUT
-	hrNotCurrentlyAvailable  uint32 = 0x887A0022 // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
-	hrUnsupported            uint32 = 0x887A0004 // DXGI_ERROR_UNSUPPORTED
-	hrDeviceRemoved          uint32 = 0x887A0005 // DXGI_ERROR_DEVICE_REMOVED
-	hrDeviceReset            uint32 = 0x887A0007 // DXGI_ERROR_DEVICE_RESET
-	hrSessionDisconnected    uint32 = 0x887A0028 // DXGI_ERROR_SESSION_DISCONNECTED
-	hrNotFound               uint32 = 0x887A0002 // DXGI_ERROR_NOT_FOUND
-	hrAccessDenied           uint32 = 0x80070005 // E_ACCESSDENIED
-	dxgiFormatB8G8R8A8UNorm         = 87
-	dxgiFormatNV12                  = 103
-	d3d11UsageDefault               = 0
-	d3d11UsageStaging               = 3
-	d3d11BindShaderResource         = 0x8
-	d3d11BindRenderTarget           = 0x20
-	d3d11CPUAccessRead              = 0x20000
-	d3d11MapRead                    = 1
-	d3d11CreateBGRASupport          = 0x20
-	d3d11CreateVideoSupport         = 0x800
-	d3d11SDKVersion                 = 7
-	d3dDriverTypeUnknown            = 0
-	d3dDriverTypeHardware           = 1
-	dxgiModeRotationIdentity        = 1
+	hrAccessLost            uint32 = 0x887A0026 // DXGI_ERROR_ACCESS_LOST
+	hrWaitTimeout           uint32 = 0x887A0027 // DXGI_ERROR_WAIT_TIMEOUT
+	hrNotCurrentlyAvailable uint32 = 0x887A0022 // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+	hrUnsupported           uint32 = 0x887A0004 // DXGI_ERROR_UNSUPPORTED
+	hrDeviceRemoved         uint32 = 0x887A0005 // DXGI_ERROR_DEVICE_REMOVED
+	hrDeviceReset           uint32 = 0x887A0007 // DXGI_ERROR_DEVICE_RESET
+	hrSessionDisconnected   uint32 = 0x887A0028 // DXGI_ERROR_SESSION_DISCONNECTED
+	hrNotFound              uint32 = 0x887A0002 // DXGI_ERROR_NOT_FOUND
+	hrAccessDenied          uint32 = 0x80070005 // E_ACCESSDENIED
+	dxgiFormatB8G8R8A8UNorm        = 87
+	dxgiFormatNV12                 = 103
+	d3d11UsageDefault              = 0
+	d3d11UsageStaging              = 3
+	d3d11BindShaderResource        = 0x8
+	d3d11BindRenderTarget          = 0x20
+	d3d11CPUAccessRead             = 0x20000
+	d3d11MapRead                   = 1
+	d3d11CreateBGRASupport         = 0x20
+	d3d11CreateVideoSupport        = 0x800
+	d3d11SDKVersion                = 7
+	d3dDriverTypeUnknown           = 0
+	d3dDriverTypeHardware          = 1
 )
 
 // Слоты таблиц методов (см. заголовки d3d11.h, dxgi.h, dxgi1_2.h): сначала три
@@ -137,6 +136,15 @@ type outduplFrameInfo struct {
 	PointerVisible        int32
 	TotalMetadataBufSize  uint32
 	PointerShapeBufferLen uint32
+}
+
+// DXGI_OUTDUPL_DESC, including the 28-byte DXGI_MODE_DESC.
+type outduplDesc struct {
+	Width, Height                     uint32
+	RefreshNum, RefreshDen            uint32
+	Format, ScanlineOrdering, Scaling uint32
+	Rotation                          uint32
+	DesktopImageInSystemMemory        int32
 }
 
 type outduplPointerShapeInfo struct {

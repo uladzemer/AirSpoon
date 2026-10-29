@@ -24,6 +24,8 @@ const (
 	slotVCtxSetStreamSourceRect  = 30
 	slotVCtxSetStreamDestRect    = 31
 	slotVCtxBlt                  = 53
+	slotVCtxSetStreamRotation    = 63
+	slotVEnumGetCaps             = 9
 )
 
 // Цветовое пространство видеопроцессора (D3D11_VIDEO_PROCESSOR_COLOR_SPACE):
@@ -33,6 +35,7 @@ const (
 	vpColorSpaceOutputBT709Limited = 1<<2 | 1<<4 // BT.709, YCbCr 16..235
 	vpViewDimensionTexture2D       = 1           // D3D11_VPIV/VPOV_DIMENSION_TEXTURE2D
 	vpFrameFormatProgressive       = 0           // D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE
+	vpFeatureCapsRotation          = 0x40
 )
 
 type vpRational struct{ Num, Den uint32 }
@@ -63,6 +66,11 @@ type vpStream struct {
 }
 
 type vpColor struct{ R, G, B, A float32 }
+
+type vpCaps struct {
+	Device, Feature, Filter, InputFormat, AutoStream, Stereo uint32
+	RateConversionCount, MaxInputStreams, MaxStreamStates    uint32
+}
 
 // videoProc — обёртка над ID3D11VideoProcessor: BGRA -> NV12 с масштабированием
 // на GPU. Один экземпляр рассчитан на фиксированные размеры источника и холста.
@@ -150,7 +158,7 @@ func probeVPFormats(vdev *com.Object) (vpFormatSupport, error) {
 
 // configure создаёт видеопроцессор для размеров srcW x srcH -> dstW x dstH и
 // задаёт вписывание fit, цветовые пространства и чёрный фон полей.
-func (v *videoProc) configure(srcW, srcH, dstW, dstH, fps int, fit Rect) error {
+func (v *videoProc) configure(srcW, srcH, dstW, dstH, fps int, fit Rect, rotation uint32) error {
 	v.releaseProc()
 	desc := vpContentDesc{
 		InputFrameFormat: vpFrameFormatProgressive,
@@ -165,6 +173,16 @@ func (v *videoProc) configure(srcW, srcH, dstW, dstH, fps int, fit Rect) error {
 	if err := com.Check("CreateVideoProcessorEnumerator", hr); err != nil {
 		return err
 	}
+	// Rotation is optional. Refuse the GPU path if unavailable so the existing
+	// system-memory/CPU fallback is used instead of silently streaming sideways.
+	var caps vpCaps
+	hr = v.enum.Call(slotVEnumGetCaps, uintptr(unsafe.Pointer(&caps)))
+	if err := com.Check("GetVideoProcessorCaps", hr); err != nil {
+		return err
+	}
+	if err := checkVPRotation(caps.Feature, rotation); err != nil {
+		return err
+	}
 	hr = v.vdev.Call(slotVDevCreateVideoProcessor, uintptr(unsafe.Pointer(v.enum)), 0, uintptr(unsafe.Pointer(&v.proc)))
 	if err := com.Check("CreateVideoProcessor", hr); err != nil {
 		v.releaseProc()
@@ -175,14 +193,36 @@ func (v *videoProc) configure(srcW, srcH, dstW, dstH, fps int, fit Rect) error {
 	full := rect32{0, 0, int32(dstW), int32(dstH)}
 	src := rect32{0, 0, int32(srcW), int32(srcH)}
 	dst := rect32{int32(fit.X), int32(fit.Y), int32(fit.Right()), int32(fit.Bottom())}
-	black := vpColor{0, 0, 0, 1}
+	// Explicit limited-range YCbCr black, matching FillBlackNV12. Some drivers
+	// interpret RGB black as Y=0 even with limited-range output selected.
+	black := vpColor{16.0 / 255, 128.0 / 255, 128.0 / 255, 1}
 	v.vctx.Call(slotVCtxSetStreamFrameFormat, uintptr(unsafe.Pointer(v.proc)), 0, vpFrameFormatProgressive)
 	v.vctx.Call(slotVCtxSetStreamColorSpace, uintptr(unsafe.Pointer(v.proc)), 0, uintptr(unsafe.Pointer(&inCS)))
 	v.vctx.Call(slotVCtxSetOutputColorSpace, uintptr(unsafe.Pointer(v.proc)), uintptr(unsafe.Pointer(&outCS)))
 	v.vctx.Call(slotVCtxSetStreamSourceRect, uintptr(unsafe.Pointer(v.proc)), 0, 1, uintptr(unsafe.Pointer(&src)))
 	v.vctx.Call(slotVCtxSetStreamDestRect, uintptr(unsafe.Pointer(v.proc)), 0, 1, uintptr(unsafe.Pointer(&dst)))
 	v.vctx.Call(slotVCtxSetOutputTargetRect, uintptr(unsafe.Pointer(v.proc)), 1, uintptr(unsafe.Pointer(&full)))
-	v.vctx.Call(slotVCtxSetOutputBackground, uintptr(unsafe.Pointer(v.proc)), 0, uintptr(unsafe.Pointer(&black)))
+	v.vctx.Call(slotVCtxSetOutputBackground, uintptr(unsafe.Pointer(v.proc)), 1, uintptr(unsafe.Pointer(&black)))
+	if caps.Feature&vpFeatureCapsRotation != 0 {
+		// D3D11 rotation values are DXGI values minus one. Source rect is in
+		// native coordinates; destination rect is in upright canvas coordinates.
+		rot := uint32(0)
+		if rotation >= dxgiModeRotationIdentity && rotation <= dxgiModeRotation270 {
+			rot = rotation - dxgiModeRotationIdentity
+		}
+		enable := uintptr(0)
+		if rot != 0 {
+			enable = 1
+		}
+		v.vctx.Call(slotVCtxSetStreamRotation, uintptr(unsafe.Pointer(v.proc)), 0, enable, uintptr(rot))
+	}
+	return nil
+}
+
+func checkVPRotation(features, rotation uint32) error {
+	if rotation > dxgiModeRotationIdentity && features&vpFeatureCapsRotation == 0 {
+		return fmt.Errorf("видеопроцессор не поддерживает поворот (DXGI Rotation=%d)", rotation)
+	}
 	return nil
 }
 
