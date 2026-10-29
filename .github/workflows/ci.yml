@@ -107,6 +107,8 @@ jobs:
     needs: validate-ref
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    # Ключ подписи APK — секрет окружения update-signing: его видят только сборки по тегу v*.*.*.
+    environment: ${{ github.ref_type == 'tag' && 'update-signing' || '' }}
     env:
       # Приватные репозитории получают раннер с ~7 ГБ ОЗУ: куча Gradle побольше, чем 1100m по умолчанию build.sh.
       GRADLE_XMX: 2500m

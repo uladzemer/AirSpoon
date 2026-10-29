@@ -17,7 +17,7 @@
 - `android/app/src/main/cpp/third_party/UxPlay/` — патчи применены прямо в исходники; `cpp/patches/UxPlay/` — только справка (при правке UxPlay добавить туда патч). Сетевой ввод от любого отправителя в LAN.
 - Сопряжение/FairPlay (`playfair`, `raop_handlers.h`), `windows/internal/airplay/` — протокол; правки сверять с doubletake/UxPlay.
 - GPL: при изменениях исходного проекта дописывать `android/NOTICE.md`, лицензии сторонних частей сохранять.
-- Ключ подписи APK — секрет: `%USERPROFILE%\.airspoon\release.jks` + `release.password` (build.sh берёт сам), в CI — секреты `AIRSPOON_KEYSTORE_B64`/`AIRSPOON_KEYSTORE_PASSWORD`. Потеря ключа = обновления больше не встанут. В репозиторий и наружу не отдавать.
+- Ключ подписи APK — секрет: `%USERPROFILE%\.airspoon\release.jks` + `release.password` (build.sh берёт сам), в CI — секреты `AIRSPOON_KEYSTORE_B64`/`AIRSPOON_KEYSTORE_PASSWORD` окружения `update-signing` (только теги v*.*.*). Там же `AIRSPOON_UPDATE_SIGNING_KEY` — ключ подписи манифеста обновлений, локально `%USERPROFILE%\.airspoon\update-signing.key`. Потеря ключа = обновления больше не встанут. В репозиторий и наружу не отдавать.
 
 ## Конвенции
 - Интерфейс и тексты для пользователя — по-русски; код и имена — по-английски.

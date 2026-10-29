@@ -36,7 +36,7 @@ JSON в UTF-8 без BOM, пробелов и завершающего пере�
 Доверенный SHA-256 обязателен даже при отсутствии digest в GitHub API. Android дополнительно
 сохраняет системную проверку подписи APK при обновлении через PackageInstaller.
 Ed25519 на API 23+ проверяется `NativeBridge.nativeVerifyEd25519` через уже собираемый
-OpenSSL 3.4.8 (`crypto` в CMake), `EVP_PKEY_ED25519` и однократный `EVP_DigestVerify`
+OpenSSL 3.5.9 LTS (`crypto` в CMake), `EVP_PKEY_ED25519` и однократный `EVP_DigestVerify`
 без предварительного хеширования и без новой зависимости; см.
 [документацию OpenSSL](https://docs.openssl.org/3.4/man7/EVP_SIGNATURE-ED25519/).
 Версия 0.1.2 манифестов не знает: переход на первый защищённый клиент требует доверенного
