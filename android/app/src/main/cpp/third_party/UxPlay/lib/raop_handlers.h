@@ -281,6 +281,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
     const char *request_data = NULL;;
     int request_datalen = 0;
     bool data_is_plist = false;
+    bool proof_request = false;
     bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
     request_data = http_request_get_data(request, &request_datalen);
     logger_log(raop->logger, LOGGER_INFO, "client requested pair-setup-pin, datalen = %d", request_datalen);
@@ -308,6 +309,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
     plist_t req_authtag_node = plist_dict_get_item(req_root_node, "authTag");
   
     if (PLIST_IS_STRING(req_method_node) && PLIST_IS_STRING(req_user_node)) {
+        conn->pin_verified = false;
+        conn->pin_verify_pending = false;
         /* this is the initial pair-setup-pin request */
         const char *salt = NULL;
         char pin[6] = { '\0' };
@@ -316,17 +319,18 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         char *method = NULL;
         char *user = NULL;
         plist_get_string_val(req_method_node, &method);
-        if (strncmp(method, "pin", strlen (method))) {
+        if (strcmp(method, "pin")) {
             logger_log(raop->logger, LOGGER_ERR, "error, required method is \"pin\", client requested \"%s\"", method);
             free (method);
             plist_free (req_root_node);
-            return;
+            goto authentication_failed;
         }
         plist_mem_free(method);
         method = NULL;
         plist_get_string_val(req_user_node, &user);
         logger_log(raop->logger, LOGGER_INFO, "pair-setup-pin:  device_id = %s", user);
         snprintf(pin, 6, "%04u", raop->pin % 10000);
+        conn->pin_generation = raop->pin_generation;
         if (raop->pin < 10000) {
             raop->pin = 0;
         }
@@ -350,6 +354,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         return;
     } else if (PLIST_IS_DATA(req_pk_node) && PLIST_IS_DATA(req_proof_node)) {
         /* this is the second part of pair-setup-pin request */
+        proof_request = true;
         char *client_pk = NULL;
         char *client_proof = NULL;
         unsigned char proof[64] = { '\0' };
@@ -358,7 +363,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         uint64_t client_proof_len = 0;
         plist_get_data_val(req_pk_node, &client_pk, &client_pk_len); 
         plist_get_data_val(req_proof_node, &client_proof, &client_proof_len);
-        if (client_proof_len > sizeof(proof)) {
+        if (conn->pin_generation != raop->pin_generation ||
+            !client_pk || !client_proof || client_pk_len == 0 || client_pk_len > SRP_PK_SIZE ||
+            client_proof_len < 20 || client_proof_len > sizeof(proof)) {
             logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client_proof_len %d invalid)", (int) client_proof_len);
             free (client_proof);
             free (client_pk);
@@ -380,6 +387,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
             logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client proof not validated)");
             goto authentication_failed;
         }
+        raop->pin_failures = 0;
+        raop->pin_failure_delay = 0;
         if (logger_debug) {
 	    char *str = utils_data_to_string((const unsigned char *) proof, sizeof(proof), 20);
             logger_log(raop->logger, LOGGER_DEBUG, "server SRP6a proof <M1> :\n%s", str);
@@ -404,6 +413,14 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         plist_get_data_val(req_epk_node, &client_epk, &client_epk_len); 
         plist_get_data_val(req_authtag_node, &client_authtag, &client_authtag_len);
 
+        if (conn->pin_generation != raop->pin_generation ||
+            !client_epk || !client_authtag || client_epk_len != sizeof(epk) || client_authtag_len != sizeof(authtag)) {
+            free(client_epk);
+            free(client_authtag);
+            plist_free(req_root_node);
+            goto authentication_failed;
+        }
+
         if (logger_debug) {
             char *str = utils_data_to_string((const unsigned char *) client_epk, client_epk_len, 16);
             logger_log(raop->logger, LOGGER_DEBUG, "client_epk %d:\n%s\n", (int) client_epk_len, str);
@@ -418,7 +435,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         free (client_epk);
         plist_free(req_root_node);
         ret = srp_confirm_pair_setup(conn->session, raop->pairing, epk, authtag);
-        if (ret < 0) {
+        if (ret != ED25519_KEY_SIZE) {
             logger_log(raop->logger, LOGGER_ERR, "pair-pin-setup (step 3): client authentication failed\n");
             goto authentication_failed;
         } else {
@@ -435,7 +452,38 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
         return;
     }
+    plist_free(req_root_node);
  authentication_failed:;
+    /* httpd serializes pairing requests: these counters span all connections. */
+    if (raop->use_pin && proof_request) {
+        raop->pin_failures++;
+        if (raop->pin_failure_delay < 10) raop->pin_failure_delay++;
+        if (raop->pin_failures >= 5) {
+            int pin = random_pin();
+            while (pin >= 0 && pin == raop->pin % 10000) pin = random_pin();
+            if (pin >= 0) {
+                raop->pin = pin + 10000;
+                raop->pin_generation++;
+                raop->pin_failures = 0;
+                char displayed_pin[5];
+                snprintf(displayed_pin, sizeof(displayed_pin), "%04u", raop->pin % 10000);
+                if (raop->callbacks.display_pin) {
+                    raop->callbacks.display_pin(raop->callbacks.cls, displayed_pin);
+                }
+            } else {
+                logger_log(raop->logger, LOGGER_ERR, "Failed to rotate PIN");
+            }
+        }
+#ifdef WIN32
+        Sleep(1000 * raop->pin_failure_delay);
+#else
+        unsigned int remaining = raop->pin_failure_delay;
+        while ((remaining = sleep(remaining))) {}
+#endif
+    }
+    pairing_session_reset_pin(conn->session);
+    conn->pin_verified = false;
+    conn->pin_verify_pending = false;
     http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
 }
 
@@ -473,10 +521,8 @@ raop_handler_pairverify(raop_conn_t *conn,
                         char **response_data, int *response_datalen)
 {
     raop_t *raop = conn->raop;
-    bool register_check = false;  
     if (pairing_session_check_handshake_status(conn->session)) {
         pairing_session_set_setup_status(conn->session);
-        register_check = raop->use_pin;
     }
     unsigned char public_key[X25519_KEY_SIZE];
     unsigned char signature[PAIRING_SIG_SIZE];
@@ -486,37 +532,41 @@ raop_handler_pairverify(raop_conn_t *conn,
     data = (unsigned char *) http_request_get_data(request, &datalen);
     if (datalen < 4) {
         logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
-        return;
+        goto verification_failed;
     }
     switch (data[0]) {
     case 1:
+        conn->pin_verified = false;
+        conn->pin_verify_pending = false;
         if (datalen != 4 + X25519_KEY_SIZE + ED25519_KEY_SIZE) {
             logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
-            return;
+            goto verification_failed;
         }
-        /* We can fall through these errors, the result will just be garbage... */
-        if (pairing_session_handshake(conn->session, data + 4, data + 4 + X25519_KEY_SIZE)) {
-            logger_log(raop->logger, LOGGER_ERR, "Error initializing pair-verify handshake");
-        }
-        if (pairing_session_get_public_key(conn->session, public_key)) {
-            logger_log(raop->logger, LOGGER_ERR, "Error getting ECDH public key");
-        }
-        if (pairing_session_get_signature(conn->session, signature)) {
-            logger_log(raop->logger, LOGGER_ERR, "Error getting ED25519 signature");
-        }
-        if (register_check) {
-            bool registered_client = true;
-            if (raop->callbacks.check_register) {
-                const unsigned char *pk = data + 4 + X25519_KEY_SIZE;
+        if (raop->use_pin) {
+            const unsigned char *pk = data + 4 + X25519_KEY_SIZE;
+            bool registered_client = pairing_session_is_pin_paired(conn->session, pk);
+            if (!registered_client && raop->callbacks.check_register) {
                 char *pk64 = NULL;
                 ed25519_pk_to_base64(pk, &pk64);
                 registered_client = raop->callbacks.check_register(raop->callbacks.cls, pk64);
-                free (pk64);
+                free(pk64);
             }
-
             if (!registered_client) {
-                return;
+                goto verification_failed;
             }
+            conn->pin_verify_pending = true;
+        }
+        if (pairing_session_handshake(conn->session, data + 4, data + 4 + X25519_KEY_SIZE)) {
+            logger_log(raop->logger, LOGGER_ERR, "Error initializing pair-verify handshake");
+            goto verification_failed;
+        }
+        if (pairing_session_get_public_key(conn->session, public_key)) {
+            logger_log(raop->logger, LOGGER_ERR, "Error getting ECDH public key");
+            goto verification_failed;
+        }
+        if (pairing_session_get_signature(conn->session, signature)) {
+            logger_log(raop->logger, LOGGER_ERR, "Error getting ED25519 signature");
+            goto verification_failed;
         }
         *response_data = calloc(1, sizeof(public_key) + sizeof(signature));
         if (*response_data) {
@@ -530,18 +580,29 @@ raop_handler_pairverify(raop_conn_t *conn,
         logger_log(raop->logger, LOGGER_DEBUG, "2nd pair-verify step: checking signature");
         if (datalen != 4 + PAIRING_SIG_SIZE) {
             logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
-            return;
+            goto verification_failed;
         }
 
-        if (pairing_session_finish(conn->session, data + 4)) {
+        if ((raop->use_pin && !conn->pin_verify_pending) || pairing_session_finish(conn->session, data + 4)) {
             logger_log(raop->logger, LOGGER_ERR, "Incorrect pair-verify signature");
-            http_response_set_disconnect(response, 1);
-            return;
+            goto verification_failed;
         }
+        conn->pin_verified = conn->pin_verify_pending;
+        conn->pin_verify_pending = false;
         logger_log(raop->logger, LOGGER_DEBUG, "pair-verify: signature is verified");	    
         http_response_add_header(response, "Content-Type", "application/octet-stream");
         break;
+    default:
+        goto verification_failed;
     }
+    return;
+
+ verification_failed:
+    conn->pin_verified = false;
+    conn->pin_verify_pending = false;
+    pairing_session_reset_pin(conn->session);
+    http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
+    http_response_set_disconnect(response, 1);
 }
 
 static void
@@ -626,8 +687,19 @@ raop_handler_setup(raop_conn_t *conn,
     // For the response
     plist_t res_root_node = plist_new_dict();
 
+    if (!PLIST_IS_DICT(req_root_node) ||
+        ((req_eiv_node || req_ekey_node) && (!PLIST_IS_DATA(req_eiv_node) || !PLIST_IS_DATA(req_ekey_node)))) {
+        goto invalid_setup;
+    }
+
     if (PLIST_IS_DATA(req_eiv_node) && PLIST_IS_DATA(req_ekey_node)) {
         // The first SETUP call that initializes keys and timing
+        if (conn->raop_ntp || conn->raop_rtp || conn->raop_rtp_mirror) {
+            http_response_init(response, "RTSP/1.0", 455, "Method Not Valid in This State");
+            plist_free(req_root_node);
+            plist_free(res_root_node);
+            return;
+        }
 
         unsigned char aesiv[16] = { 0 };
         unsigned char aeskey[16] = { 0 };
@@ -779,6 +851,10 @@ raop_handler_setup(raop_conn_t *conn,
         }
 
         plist_get_data_val(req_eiv_node, &eiv, &eiv_len);
+        if (!eiv || eiv_len != sizeof(aesiv)) {
+            free(eiv);
+            goto invalid_setup;
+        }
         memcpy(aesiv, eiv, 16);
         free(eiv);	
         logger_log(raop->logger, LOGGER_DEBUG, "eiv_len = %llu", eiv_len);
@@ -791,6 +867,10 @@ raop_handler_setup(raop_conn_t *conn,
         char* ekey = NULL;
         uint64_t ekey_len = 0;
         plist_get_data_val(req_ekey_node, &ekey, &ekey_len);
+        if (!ekey || ekey_len != sizeof(eaeskey)) {
+            free(ekey);
+            goto invalid_setup;
+        }
         memcpy(eaeskey,ekey,72);
         free(ekey);
         logger_log(raop->logger, LOGGER_DEBUG, "ekey_len = %llu", ekey_len);
@@ -802,6 +882,12 @@ raop_handler_setup(raop_conn_t *conn,
         }
         int ret = fairplay_decrypt(conn->fairplay, (unsigned char*) eaeskey, aeskey);
         logger_log(raop->logger, LOGGER_DEBUG, "fairplay_decrypt ret = %d", ret);
+        if (ret != 0) {
+            http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
+            plist_free(req_root_node);
+            plist_free(res_root_node);
+            return;
+        }
         if (logger_debug) {
             char *str = utils_data_to_string(aeskey, 16, 16);
             logger_log(raop->logger, LOGGER_DEBUG, "16 byte aeskey (fairplay-decrypted from ekey):\n%s", str);
@@ -959,7 +1045,13 @@ raop_handler_setup(raop_conn_t *conn,
                            " key and iv): %llu", stream_connection_id);
 
                 if (conn->raop_rtp_mirror) {
-                    raop_rtp_mirror_init_aes(conn->raop_rtp_mirror, &stream_connection_id);
+                    if (raop_rtp_mirror_init_aes(conn->raop_rtp_mirror, &stream_connection_id) < 0) {
+                        http_response_init(response, "RTSP/1.0", 455, "Method Not Valid in This State");
+                        plist_free(res_streams_node);
+                        plist_free(req_root_node);
+                        plist_free(res_root_node);
+                        return;
+                    }
                     raop_rtp_mirror_start(conn->raop_rtp_mirror, &dport, raop->clientFPSdata);
                     logger_log(raop->logger, LOGGER_DEBUG, "Mirroring initialized successfully");
                 } else {
@@ -1060,6 +1152,12 @@ raop_handler_setup(raop_conn_t *conn,
     plist_free(res_root_node);
     plist_free(req_root_node);
     http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
+    return;
+
+ invalid_setup:
+    plist_free(req_root_node);
+    plist_free(res_root_node);
+    http_response_init(response, "RTSP/1.0", 400, "Bad Request");
 }
 
 static void

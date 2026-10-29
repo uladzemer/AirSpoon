@@ -46,7 +46,10 @@ const char *get_language_code(airplay_video_t *airplay_video);
 void set_language_name(airplay_video_t *airplay_video, const char *language_name, size_t len);
 const char *get_language_name(airplay_video_t *airplay_video);
 
-int get_next_FCUP_RequestID(airplay_video_t *airplay_video);    
+int get_next_FCUP_RequestID(airplay_video_t *airplay_video);
+bool is_fcup_response_expected(airplay_video_t *airplay_video, const char *url);
+/* Includes the terminating NUL; also bounds 32-bit playlist expansion. */
+#define MAX_PLAYLIST_SIZE (16U * 1024U * 1024U)
 void set_next_media_uri_id(airplay_video_t *airplay_video, int id);
 int get_next_media_uri_id(airplay_video_t *airplay_video);
 int get_num_media_uri(airplay_video_t *airplay_video);
@@ -63,6 +66,7 @@ char *select_master_playlist_language(airplay_video_t *airplay_video, char *mast
 int store_media_playlist(airplay_video_t *airplay_video, char *media_playlist, int *count, float *duration, bool*endlist, int num);
 char *get_master_playlist(airplay_video_t *airplay_video);
 char *get_media_playlist(airplay_video_t *airplay_video, int *count, float *duration, const char *uri, bool *should_fetch, const char **remote_uri);
+void cancel_media_playlist_fetch(airplay_video_t *airplay_video, const char *remote_uri);
 
 void destroy_media_data_store(airplay_video_t *airplay_video);
 void create_media_data_store(airplay_video_t * airplay_video, char ** media_data_store, int num_uri);

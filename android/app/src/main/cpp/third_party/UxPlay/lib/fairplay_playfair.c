@@ -50,14 +50,14 @@ fairplay_setup(fairplay_t *fp, const unsigned char req[16], unsigned char res[14
 {
     assert(fp);
 
-    if (req[4] != 0x03) {
-        /* Unsupported fairplay version */
+    fp->keymsglen = 0;
+    if (req[4] != 0x03 || req[14] > 3) {
+        /* Unsupported fairplay version or mode */
         return -1;
     }
 
     int mode = req[14];
     memcpy(res, reply_message[mode], 142);
-    fp->keymsglen = 0;
     return 0;
 }
 
@@ -66,8 +66,9 @@ fairplay_handshake(fairplay_t *fp, const unsigned char req[164], unsigned char r
 {
     assert(fp);
 
-    if (req[4] != 0x03) {
-        /* Unsupported fairplay version */
+    fp->keymsglen = 0;
+    if (req[4] != 0x03 || req[12] > 3) {
+        /* Unsupported fairplay version or mode */
         return -1;
     }
 

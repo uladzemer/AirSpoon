@@ -309,6 +309,30 @@ int get_next_FCUP_RequestID(airplay_video_t *airplay_video) {
     return ++(airplay_video->FCUP_RequestID);
 }
 
+bool is_fcup_response_expected(airplay_video_t *airplay_video, const char *url) {
+    if (!url || !airplay_video->uri_prefix || !*airplay_video->uri_prefix ||
+        !airplay_video->FCUP_RequestID) return false;
+    bool expected = false;
+    pthread_mutex_lock(&airplay_video->media_data_store_lock);
+    if (!airplay_video->master_playlist) {
+        size_t len = strlen(airplay_video->uri_prefix);
+        expected = !strncmp(url, airplay_video->uri_prefix, len) &&
+                   !strncmp(url + len, "/master.m3u8", strlen("/master.m3u8"));
+    } else {
+        for (int i = 0; i < airplay_video->num_uri; i++) {
+            media_item_t *item = &airplay_video->media_data_store[i];
+            if (!strcmp(item->uri, url)) {
+                expected = (!airplay_video->initial_fetch_complete &&
+                            i == airplay_video->next_uri - 1) ||
+                           airplay_video->media_data_store[item->num].fetch_pending;
+                if (expected) break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&airplay_video->media_data_store_lock);
+    return expected;
+}
+
 void  set_next_media_uri_id(airplay_video_t *airplay_video, int num) {
     airplay_video->next_uri = num;
 }
@@ -357,6 +381,7 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
         return NULL;
     }
     language_t *languages = (language_t *) calloc(count + 2, sizeof(language_t));
+    if (!languages) return NULL;
     size_t length = 0;
     ptr = data;
     for (int i = 1; i <= count; i++) {
@@ -383,12 +408,15 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
             break;
         }
 	    ptr += strlen("NAME=");
+	    if (*ptr != '"') break;
 	    end = strchr(++ptr,'"');
 	    if (!end) {
             break;
         }
 	    len_name = end - ptr;
+	    if (!len_name) goto language_error;
 	    languages[i].name = (char *) calloc(len_name + 1, sizeof(char));
+	    if (!languages[i].name) goto language_error;
 	    memcpy(languages[i].name, ptr, len_name *sizeof(char));
 	    if (!(ptr = strstr(ptr, "LANGUAGE="))) {
             break;
@@ -399,7 +427,10 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
         if (!(end = strchr(++ptr,'"'))) {
             break;
         }
-        strncpy(languages[i].code, ptr, end - ptr);
+        size_t code_len = end - ptr;
+        if (!code_len || code_len >= sizeof(languages[i].code)) goto language_error;
+        memcpy(languages[i].code, ptr, code_len);
+        languages[i].code[code_len] = '\0';
         if (!(ptr = strchr(ptr,'\n'))) {
             break;
         }
@@ -407,7 +438,7 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
         languages[i].len = (int) (ptr + 1 - languages[i].start);
 	    length += languages[i].len;
     }
-    assert (count1 == count);
+    if (count1 != count) goto language_error;
     
     languages[count + 1].start = ++ptr;
     languages[count + 1].len = strlen(ptr);
@@ -415,7 +446,7 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
     languages[count + 1].name = NULL;
 
     length += languages[count + 1].len;
-    assert(length == strlen(data));
+    if (length != strlen(data)) goto language_error;
     *slices = count + 2;
 
     int copies = 0;
@@ -426,16 +457,21 @@ language_t* master_playlist_process_language(const char * data, int *slices, int
      }
 
     *language_count = count/copies;
-    assert(count == *language_count * copies);
+    if (count != *language_count * copies) goto language_error;
 
     /* verify expected structure of language choice information */
     for (int i = 1; i <= count; i++) {
   	int j = i - *language_count;
         if (j > 0) {
-            assert (!strcmp(languages[i].code, languages[j].code));
+            if (strcmp(languages[i].code, languages[j].code)) goto language_error;
         }
     }
     return languages;
+ language_error:
+    for (int i = 1; i <= count; i++) free(languages[i].name);
+    free(languages);
+    *language_count = 0;
+    return NULL;
 }
 
 char * select_master_playlist_language(airplay_video_t *airplay_video, char *master_playlist) {
@@ -512,7 +548,7 @@ char * select_master_playlist_language(airplay_video_t *airplay_video, char *mas
     if (name != language_name) {   /* compare addresses */
         size_t len = strlen(name);
         char *new_language_name = (char *) calloc(len + 1, sizeof(char));
-        char *new_language_code = (char *) calloc(len + 1, sizeof(char));
+        char *new_language_code = (char *) calloc(strlen(code) + 1, sizeof(char));
         if (!new_language_name || !new_language_code) {
             printf("Memory allocation failure (new_language_name/code\n");
             exit (1);
@@ -729,6 +765,17 @@ char * get_media_playlist(airplay_video_t *airplay_video, int *count, float *dur
     return NULL;
 }
 
+void cancel_media_playlist_fetch(airplay_video_t *airplay_video, const char *remote_uri) {
+    pthread_mutex_lock(&airplay_video->media_data_store_lock);
+    for (int i = 0; i < airplay_video->num_uri; i++) {
+        media_item_t *item = &airplay_video->media_data_store[i];
+        if (!strcmp(item->uri, remote_uri)) {
+            airplay_video->media_data_store[item->num].fetch_pending = false;
+        }
+    }
+    pthread_mutex_unlock(&airplay_video->media_data_store_lock);
+}
+
 char * get_media_uri_by_num(airplay_video_t *airplay_video, int num) {
     media_item_t * media_data_store = airplay_video->media_data_store;
     if (num >= 0 && num < airplay_video->num_uri) {
@@ -776,6 +823,7 @@ int analyze_media_playlist(char *playlist, float *duration, bool *endlist) {
 /* parse Master Playlist, make table of Media Playlist uri's that it lists */
 int create_media_uri_table(const char *url_prefix, const char *master_playlist_data,
                            int datalen, char ***media_uri_table, int *num_uri) {
+    if (!url_prefix || !*url_prefix || !master_playlist_data) return -1;
     const char *ptr = strstr(master_playlist_data, url_prefix);
     char ** table = NULL;
     if (ptr == NULL) {
@@ -787,7 +835,7 @@ int create_media_uri_table(const char *url_prefix, const char *master_playlist_d
         if (end == NULL) {
             return 1;
         }
-        end += sizeof("m3u8");
+        end += strlen("m3u8");
         count++;
         ptr = strstr(end, url_prefix);
     }
@@ -806,8 +854,8 @@ int create_media_uri_table(const char *url_prefix, const char *master_playlist_d
         if (end == NULL) {
             return 0;
         }
-        end += sizeof("m3u8");
-        size_t len = end - ptr - 1;
+        end += strlen("m3u8");
+        size_t len = end - ptr;
 	    uri  = (char *) calloc(len + 1, sizeof(char));
         if (!uri) {
             printf("Memory allocation failure (uri)\n");
@@ -828,6 +876,7 @@ int create_media_uri_table(const char *url_prefix, const char *master_playlist_d
 /* Adjust uri prefixes in the Master Playlist, for sending to the Media Player */
 char *adjust_master_playlist (char *fcup_response_data, int fcup_response_datalen,
                               const char *uri_prefix, char *uri_local_prefix) {
+    if (!uri_prefix || !*uri_prefix || !uri_local_prefix) return NULL;
     size_t uri_prefix_len = strlen(uri_prefix);
     size_t uri_local_prefix_len = strlen(uri_local_prefix);
     int counter = 0;
@@ -884,7 +933,7 @@ static char *_quoted_field(const char *hay, const char *key, size_t *len) {
     if (!end) return NULL;
     *len = end - begin;
     char *val = (char *) calloc(*len + 1, sizeof(char));
-    assert(val);
+    if (!val) return NULL;
     memcpy(val, begin, *len);
     return val;
 }
@@ -895,13 +944,18 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
    the full Media Playlist format.
    It  returns a pointer to the expanded playlist, WHICH MUST BE FREED AFTER USE */
 
+    size_t old_size = strlen(media_playlist);
+    if (old_size >= MAX_PLAYLIST_SIZE) return NULL;
+    const char *playlist_end = media_playlist + old_size;
     size_t base_uri_len = 0;
     size_t params_len = 0;
     size_t prefix_len = 0;
-    const char* ptr = strstr(media_playlist, "#EXTM3U\n");
-    if (!ptr) return _raw_copy_playlist(media_playlist);
-
-    ptr += strlen("#EXTM3U\n");
+    const char* ptr = media_playlist;
+    if (strncmp(ptr, "#EXTM3U", 7)) return _raw_copy_playlist(media_playlist);
+    ptr += 7;
+    if (*ptr == '\r') ptr++;
+    if (*ptr != '\n') return _raw_copy_playlist(media_playlist);
+    ptr++;
     if (strncmp(ptr, "#YT-EXT-CONDENSED-URL", strlen("#YT-EXT-CONDENSED-URL"))) {
         return _raw_copy_playlist(media_playlist);
     }
@@ -919,6 +973,11 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
     int nparams = 0;
     int *params_size = NULL;
     const char **params_start = NULL;
+    char *new_playlist = NULL;
+    if (!prefix_len) {
+        new_playlist = _raw_copy_playlist(media_playlist);
+        goto rewrite_done;
+    }
     if (strlen(params)) {
         nparams = 1;
         const char * comma = strchr(params, ',');
@@ -930,8 +989,7 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
         params_start = (const char **) calloc(nparams, sizeof(char *));  //must free
         params_size = (int *)  calloc(nparams, sizeof(int));     //must free
         if (!params_start || !params_size) {
-            printf("Memory allocation failure (params_start/size)\n");
-            exit(1);
+            goto rewrite_error;
         }
         ptr = params;
         for (int i = 0; i < nparams; i++) {
@@ -955,14 +1013,19 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
         ptr = strstr(++ptr, "#EXTINF");
     }
 
-    size_t old_size = strlen(media_playlist);
-    size_t new_len = old_size + (size_t) count * (base_uri_len + params_len + 2 * nparams + 2);
+    size_t max_len = MAX_PLAYLIST_SIZE - 1;
+    if (base_uri_len > max_len - params_len) goto rewrite_error;
+    size_t expansion = base_uri_len + params_len;
+    if (expansion > max_len - 2 ||
+        (size_t) nparams > (max_len - expansion - 2) / 2) goto rewrite_error;
+    expansion += 2 * (size_t) nparams + 2;
+    if (count && expansion > (max_len - old_size) / (size_t) count) goto rewrite_error;
+    size_t new_len = old_size + (size_t) count * expansion;
 
-    int byte_count = 0;
-    char * new_playlist = (char *) malloc(new_len + 1);
+    size_t byte_count = 0;
+    new_playlist = (char *) malloc(new_len + 1);
     if (!new_playlist) {
-        printf("Memory allocation failure (new_playlist)\n");
-        exit(1);
+        goto rewrite_error;
     }
     new_playlist[new_len] = '\0';
     const char *old_pos = media_playlist;
@@ -971,6 +1034,7 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
     ptr = strstr(old_pos, "#EXTINF:");
     size_t len = (ptr ? ptr : old_pos + strlen(old_pos)) - old_pos;
     /* copy header section before chunks */
+    if (len > new_len - byte_count) goto rewrite_error;
     memcpy(new_pos, old_pos, len);
     byte_count += len;
     old_pos += len;
@@ -980,19 +1044,36 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
         const char *end = NULL;
         const char *start = strstr(ptr, prefix);
         if (!start) break;
+        const char *uri_line = strchr(ptr, '\n');
+        if (!uri_line || start <= uri_line) goto stop_rewriting_chunks;
+        const char *next = strstr(ptr + 1, "#EXTINF:");
+        if (next && start >= next) goto stop_rewriting_chunks;
+        if (old_pos != ptr) goto stop_rewriting_chunks;
         len = start - ptr;
         /* copy first line of chunk entry */
+        if (len > new_len - byte_count) goto rewrite_error;
         memcpy(new_pos, old_pos, len);
         byte_count += len;
         old_pos += len;
         new_pos += len;
 	
 	    /* copy base uri  to replace prefix*/
+        if (base_uri_len > new_len - byte_count) goto rewrite_error;
         memcpy(new_pos, base_uri, base_uri_len);
         byte_count += base_uri_len;
         new_pos += base_uri_len;
         old_pos += prefix_len;
         ptr = strstr(old_pos, "#EXTINF:");
+
+        if (!nparams) {
+            end = ptr ? ptr : playlist_end;
+            len = end - old_pos;
+            if (len > new_len - byte_count) goto rewrite_error;
+            memcpy(new_pos, old_pos, len);
+            new_pos += len;
+            byte_count += len;
+            old_pos = end;
+        }
 
         /* insert the PARAMS separators on the slices line  */
         end = old_pos;
@@ -1012,6 +1093,12 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
                     goto stop_rewriting_chunks;
                 }
             }
+            if (end < old_pos || (ptr && end > ptr) ||
+                (i != last && end == playlist_end)) goto stop_rewriting_chunks;
+            len = end - old_pos;
+            if ((size_t) params_size[i] > new_len - byte_count ||
+                new_len - byte_count - params_size[i] < 2 ||
+                len > new_len - byte_count - params_size[i] - 2) goto rewrite_error;
             *new_pos = '/';
             byte_count++;
             new_pos++;
@@ -1022,12 +1109,6 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
             byte_count++;
             new_pos++;
 
-            if (end < old_pos) {
-                goto stop_rewriting_chunks;
-            }
-            len = end - old_pos;
-            end++;
-
             memcpy (new_pos, old_pos, len);
             byte_count += len;
             new_pos += len;
@@ -1035,6 +1116,7 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
             if (i != last) {
                 old_pos++; /* last entry is not followed by "/" separator */
             }
+            end = old_pos;
         }
         if (ptr && old_pos != ptr) {
             goto stop_rewriting_chunks;
@@ -1043,14 +1125,21 @@ char *adjust_yt_condensed_playlist(const char *media_playlist) {
  stop_rewriting_chunks:
     /* copy tail */
      
-    len = media_playlist + strlen(media_playlist) - old_pos;
+    if (old_pos > playlist_end) goto rewrite_error;
+    len = playlist_end - old_pos;
+    if (len > new_len - byte_count) goto rewrite_error;
     memcpy(new_pos, old_pos, len);
     byte_count += len;
     new_pos += len;
     old_pos += len;
 
     new_playlist[byte_count] = '\0';
-    assert(byte_count <= (int) new_len);
+    goto rewrite_done;
+
+ rewrite_error:
+    free(new_playlist);
+    new_playlist = NULL;
+ rewrite_done:
 
     free (prefix);
     free (base_uri);

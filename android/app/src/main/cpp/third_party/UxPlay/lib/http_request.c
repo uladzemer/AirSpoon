@@ -54,8 +54,19 @@ on_url(llhttp_t *parser, const char *at, size_t length)
     request->url[urllen] = '\0';
     strncat(request->url, at, length);
 
-    strncpy(request->protocol, at + length + 1, 8);
+    return 0;
+}
 
+static int
+on_protocol(llhttp_t *parser, const char *at, size_t length)
+{
+    http_request_t *request = parser->data;
+    size_t used = strlen(request->protocol);
+    if (length > sizeof(request->protocol) - used - 1) {
+        return -1;
+    }
+    memcpy(request->protocol + used, at, length);
+    request->protocol[used + length] = '\0';
     return 0;
 }
 
@@ -138,6 +149,9 @@ on_message_complete(llhttp_t *parser)
     http_request_t *request = parser->data;
 
     request->method = llhttp_method_name(request->parser.method);
+    size_t used = strlen(request->protocol);
+    snprintf(request->protocol + used, sizeof(request->protocol) - used, "/%u.%u",
+             parser->http_major, parser->http_minor);
     request->complete = 1;
     return 0;
 }
@@ -152,6 +166,7 @@ http_request_init(void)
 
     llhttp_settings_init(&request->parser_settings);
     request->parser_settings.on_url = &on_url;
+    request->parser_settings.on_protocol = &on_protocol;
     request->parser_settings.on_header_field = &on_header_field;
     request->parser_settings.on_header_value = &on_header_value;
     request->parser_settings.on_body = &on_body;

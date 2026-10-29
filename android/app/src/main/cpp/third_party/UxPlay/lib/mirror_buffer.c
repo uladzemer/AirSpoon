@@ -92,12 +92,24 @@ mirror_buffer_init(logger_t *logger, const unsigned char *aeskey)
 }
 
 void mirror_buffer_decrypt(mirror_buffer_t *mirror_buffer, unsigned char* input, unsigned char* output, int inputLen) {
+    if (inputLen <= 0) {
+        return;
+    }
+    int consumed = 0;
     // Start decrypting
     if (mirror_buffer->nextDecryptCount > 0) {//mirror_buffer->nextDecryptCount = 10
-        for (int i = 0; i < mirror_buffer->nextDecryptCount; i++) {
+        consumed = inputLen < mirror_buffer->nextDecryptCount ? inputLen : mirror_buffer->nextDecryptCount;
+        for (int i = 0; i < consumed; i++) {
             output[i] = (input[i] ^ mirror_buffer->og[(16 - mirror_buffer->nextDecryptCount) + i]);
         }
+        mirror_buffer->nextDecryptCount -= consumed;
+        if (consumed == inputLen) {
+            return;
+        }
     }
+    input += consumed;
+    output += consumed;
+    inputLen -= consumed;
     // Handling encrypted bytes
     int encryptlen = ((inputLen - mirror_buffer->nextDecryptCount) / 16) * 16;
     // Aes decryption

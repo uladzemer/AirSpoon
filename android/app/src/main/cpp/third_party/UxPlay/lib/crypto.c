@@ -242,26 +242,22 @@ void x25519_key_destroy(x25519_key_t *key) {
     }
 }
 
-void x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs) {
+int x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs) {
     EVP_PKEY_CTX *pctx;
 
     assert(ours);
     assert(theirs);
 
     pctx = EVP_PKEY_CTX_new(ours->pkey, NULL);
-    if (!pctx) {
-        handle_error(__func__);
-    }
-    if (!EVP_PKEY_derive_init(pctx)) {
-        handle_error(__func__);
-    }
-    if (!EVP_PKEY_derive_set_peer(pctx, theirs->pkey)) {
-        handle_error(__func__);
-    }
-    if (!EVP_PKEY_derive(pctx, secret, &(size_t) {X25519_KEY_SIZE})) {
-        handle_error(__func__);
+    if (!pctx || EVP_PKEY_derive_init(pctx) <= 0 ||
+        EVP_PKEY_derive_set_peer(pctx, theirs->pkey) <= 0 ||
+        EVP_PKEY_derive(pctx, secret, &(size_t) {X25519_KEY_SIZE}) <= 0) {
+        EVP_PKEY_CTX_free(pctx);
+        memset(secret, 0, X25519_KEY_SIZE);
+        return -1;
     }
     EVP_PKEY_CTX_free(pctx);
+    return 0;
 }
 
 // GCM AES 128

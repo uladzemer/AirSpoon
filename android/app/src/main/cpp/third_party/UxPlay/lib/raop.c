@@ -77,6 +77,9 @@ struct raop_s {
      /* for temporary storage of pin during pair-pin start */
     unsigned short pin;
     bool use_pin;
+    unsigned int pin_generation;
+    unsigned int pin_failures;
+    unsigned int pin_failure_delay;
   
      /* public key as string */
     char pk_str[2*ED25519_KEY_SIZE + 1];
@@ -119,12 +122,49 @@ struct raop_conn_s {
 
     char *client_session_id;
     bool authenticated;
+    bool pin_verified;
+    bool pin_verify_pending;
+    unsigned int pin_generation;
     bool have_active_remote;
 
     /* AirSpoon: приложению сообщено о соединении (conn_init callback) */
     bool announced;
 };
 typedef struct raop_conn_s raop_conn_t;
+
+static bool
+same_remote(const raop_conn_t *a, const raop_conn_t *b) {
+    return a->remotelen == b->remotelen && a->zone_id == b->zone_id &&
+           !memcmp(a->remote, b->remote, a->remotelen);
+}
+
+static bool
+pin_authorized(raop_conn_t *conn, bool airplay_video) {
+    raop_t *raop = conn->raop;
+    if (!raop->use_pin || conn->pin_verified) return true;
+    if (airplay_video) {
+        raop_conn_t *peer;
+        for (int i = 1; (peer = httpd_get_connection_by_type(raop->httpd, CONNECTION_TYPE_RAOP, i)); i++) {
+            if (peer->pin_verified && same_remote(conn, peer)) return true;
+        }
+    }
+    return false;
+}
+
+static bool
+claim_raop_connection(raop_conn_t *conn, bool ble) {
+    raop_t *raop = conn->raop;
+    if (httpd_count_connection_type(raop->httpd, CONNECTION_TYPE_RAOP)) {
+        if (!httpd_nohold(raop->httpd) || ble) return false;
+        httpd_remove_known_connections(raop->httpd);
+        if (raop->callbacks.video_reset) {
+            raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_NOHOLD);
+        }
+    }
+    httpd_set_connection_type(raop->httpd, conn, CONNECTION_TYPE_RAOP);
+    conn->connection_type = CONNECTION_TYPE_RAOP;
+    return true;
+}
 
 #include "raop_handlers.h"
 #include "http_handlers.h"
@@ -291,27 +331,50 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
      * (409 для настоящего подключения). Тип дадим на первом настоящем запросе. */
     bool probe_only = probe && !ble && !client_session_id;
 
+    bool authorized = pin_authorized(conn, !cseq && client_session_id && !strcmp(protocol, "HTTP/1.1"));
+    bool pairing_request = !strcmp(method, "POST") &&
+        (!strcmp(url, "/pair-pin-start") || !strcmp(url, "/pair-setup") ||
+         !strcmp(url, "/pair-setup-pin") || !strcmp(url, "/pair-verify") ||
+         !strcmp(url, "/fp-setup") || !strcmp(url, "/fp-setup2") || !strcmp(url, "/feedback"));
+    bool public_request = !strcmp(method, "OPTIONS") || pairing_request ||
+        /* /command has no handler here: retain its no-op reply before pairing. */
+        (!strcmp(method, "POST") && !strcmp(url, "/command")) ||
+        (!strcmp(method, "GET") && (!strcmp(url, "/info") || !strncmp(url, "/info?", 6) ||
+                                   !strcmp(url, "/server-info")));
+    /* Internal playlist GETs are local only; a forged Host header is not authorization. */
+    static const unsigned char loopback4[4] = {127, 0, 0, 1};
+    static const unsigned char loopback6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    bool local_hls = hls_request && !strcmp(method, "GET") &&
+        ((conn->remotelen == 4 && !memcmp(conn->remote, loopback4, 4)) ||
+         (conn->remotelen == 16 && !memcmp(conn->remote, loopback6, 16)));
+    if (!authorized && !public_request && !local_hls) {
+        *response = http_response_create();
+        http_response_init(*response, protocol, 470, "Client Authentication Failure");
+        goto finish;
+    }
+    bool video_control = (!strcmp(method, "POST") &&
+        (!strcmp(url, "/stop") || !strncmp(url, "/rate?", 6) || !strncmp(url, "/scrub?", 7) ||
+         !strcmp(url, "/action"))) || (!strcmp(method, "PUT") && !strncmp(url, "/setProperty?", 13));
+    raop_conn_t *video_conn = raop->video_play_conn;
+    if (video_control && (!video_conn ||
+        (conn != video_conn && (!client_session_id || !video_conn->client_session_id ||
+         strcmp(client_session_id, video_conn->client_session_id) || !same_remote(conn, video_conn))))) {
+        *response = http_response_create();
+        http_response_init(*response, protocol, 470, "Client Authentication Failure");
+        goto finish;
+    }
+
     if (conn->connection_type == CONNECTION_TYPE_UNKNOWN && !probe_only) {
         if (cseq || ble) {
-            if (httpd_count_connection_type(raop->httpd, CONNECTION_TYPE_RAOP)) {
-                char ipaddr[40] = { '\0' };
-                utils_ipaddress_to_string(conn->remotelen, conn->remote, conn->zone_id, ipaddr, (int) (sizeof(ipaddr)));
-                if (httpd_nohold(raop->httpd) && !ble) {
-                    logger_log(raop->logger, LOGGER_INFO, "*****\"nohold\" feature: switch to new connection request from %s", ipaddr);		  
-                    httpd_remove_known_connections(raop->httpd);
-                    if (raop->callbacks.video_reset) {
-                        raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_NOHOLD);
-                    }
-                } else {
-                    logger_log(raop->logger, LOGGER_WARNING, "rejecting new connection request from %s", ipaddr);
-                    *response = http_response_create();
-                    http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
-                    goto finish;
-                }
+            /* PIN pairing must finish before nohold can evict the current client.
+             * Keep the new connection unclassified until pair-verify succeeds. */
+            if (!authorized) goto connection_identified;
+            if (!claim_raop_connection(conn, ble)) {
+                *response = http_response_create();
+                http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
+                goto finish;
             }
             logger_log(raop->logger, LOGGER_DEBUG, "New connection %p identified as Connection type RAOP", ptr);
-            httpd_set_connection_type(raop->httpd, ptr, CONNECTION_TYPE_RAOP);
-            conn->connection_type = CONNECTION_TYPE_RAOP;
         } else if (client_session_id) {
             logger_log(raop->logger, LOGGER_DEBUG, "New connection %p identified as Connection type AirPlay", ptr);            
             httpd_set_connection_type(raop->httpd, ptr, CONNECTION_TYPE_AIRPLAY);
@@ -321,7 +384,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
             memcpy(conn->client_session_id, client_session_id, strlen(client_session_id));
             /* airplay video has been requested: shut down any running RAOP udp services */
             raop_conn_t *raop_conn = (raop_conn_t *) httpd_get_connection_by_type(raop->httpd, CONNECTION_TYPE_RAOP, 1);
-            if (raop_conn) {
+            if (raop_conn && authorized && same_remote(conn, raop_conn)) {
                 raop_rtp_mirror_t *raop_rtp_mirror = raop_conn->raop_rtp_mirror;
                 if (raop_rtp_mirror) {
                     logger_log(raop->logger, LOGGER_DEBUG, "New AirPlay connection: stopping RAOP mirror"
@@ -352,11 +415,12 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
         }
     }
 
+ connection_identified:
     /* AirSpoon: о подключении сообщаем приложению только на первом настоящем запросе
      * сессии (pair-setup, fp-setup, SETUP и т.д.), который приёмник принял. Опрос
      * (GET /info, OPTIONS) и отклонённые запросы (400, 409, ранний выход выше) сессией
      * не считаются, и их закрытие не трогает идущий показ (см. conn_destroy). */
-    if (!conn->announced && !probe) {
+    if (!conn->announced && !probe && authorized) {
         conn->announced = true;
         if (raop->callbacks.conn_init) {
             raop->callbacks.conn_init(raop->callbacks.cls);
@@ -372,7 +436,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
 	    http_response_add_header(*response, "Audio-Jack-Status", "connected; type=digital");
     }
 
-    if (!conn->have_active_remote) {
+    if (!conn->have_active_remote && authorized) {
         const char *active_remote = http_request_get_header(request, "Active-Remote");
         if (active_remote) {
             conn->have_active_remote = true;
@@ -516,6 +580,15 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
 
     if (handler != NULL) {
         handler(conn, request, *response, &response_data, &response_datalen);
+        if (handler == &raop_handler_pairverify && conn->pin_verified &&
+            conn->connection_type == CONNECTION_TYPE_UNKNOWN && cseq) {
+            /* Publish the verified RAOP peer now: /play may be the next request,
+             * on a separate HTTP connection with no intervening RTSP SETUP. */
+            if (!claim_raop_connection(conn, false)) {
+                conn->pin_verified = false;
+                http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
+            }
+        }
     } else {
         logger_log(raop->logger, LOGGER_INFO,
                    "Unhandled Client Request: %s %s %s", method, url, protocol);
@@ -747,7 +820,9 @@ void
 raop_destroy(raop_t *raop) {
     if (raop) {
         raop_destroy_airplay_video(raop, -1);
-        raop_stop_httpd(raop);
+        if (raop->httpd) {
+            raop_stop_httpd(raop);
+        }
         pairing_destroy(raop->pairing);
         httpd_destroy(raop->httpd);
         logger_destroy(raop->logger);

@@ -1,0 +1,1070 @@
+diff --git a/lib/crypto.c b/lib/crypto.c
+index 762c648..577a955 100644
+--- a/lib/crypto.c
++++ b/lib/crypto.c
+@@ -242,26 +242,22 @@ void x25519_key_destroy(x25519_key_t *key) {
+     }
+ }
+ 
+-void x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs) {
++int x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs) {
+     EVP_PKEY_CTX *pctx;
+ 
+     assert(ours);
+     assert(theirs);
+ 
+     pctx = EVP_PKEY_CTX_new(ours->pkey, NULL);
+-    if (!pctx) {
+-        handle_error(__func__);
+-    }
+-    if (!EVP_PKEY_derive_init(pctx)) {
+-        handle_error(__func__);
+-    }
+-    if (!EVP_PKEY_derive_set_peer(pctx, theirs->pkey)) {
+-        handle_error(__func__);
+-    }
+-    if (!EVP_PKEY_derive(pctx, secret, &(size_t) {X25519_KEY_SIZE})) {
+-        handle_error(__func__);
++    if (!pctx || EVP_PKEY_derive_init(pctx) <= 0 ||
++        EVP_PKEY_derive_set_peer(pctx, theirs->pkey) <= 0 ||
++        EVP_PKEY_derive(pctx, secret, &(size_t) {X25519_KEY_SIZE}) <= 0) {
++        EVP_PKEY_CTX_free(pctx);
++        memset(secret, 0, X25519_KEY_SIZE);
++        return -1;
+     }
+     EVP_PKEY_CTX_free(pctx);
++    return 0;
+ }
+ 
+ // GCM AES 128
+diff --git a/lib/crypto.h b/lib/crypto.h
+index b999c92..afa5e61 100644
+--- a/lib/crypto.h
++++ b/lib/crypto.h
+@@ -69,7 +69,7 @@ void x25519_key_destroy(x25519_key_t *key);
+ int get_random_bytes(unsigned char *buf, int num);
+ void pk_to_base64(const unsigned char *pk, int pk_len, char *pk_base64, int len);
+   
+-void x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs);
++int x25519_derive_secret(unsigned char secret[X25519_KEY_SIZE], const x25519_key_t *ours, const x25519_key_t *theirs);
+ 
+ // GCM AES 128
+ 
+diff --git a/lib/mirror_buffer.c b/lib/mirror_buffer.c
+index 95492e8..87396bf 100644
+--- a/lib/mirror_buffer.c
++++ b/lib/mirror_buffer.c
+@@ -92,12 +92,24 @@ mirror_buffer_init(logger_t *logger, const unsigned char *aeskey)
+ }
+ 
+ void mirror_buffer_decrypt(mirror_buffer_t *mirror_buffer, unsigned char* input, unsigned char* output, int inputLen) {
++    if (inputLen <= 0) {
++        return;
++    }
++    int consumed = 0;
+     // Start decrypting
+     if (mirror_buffer->nextDecryptCount > 0) {//mirror_buffer->nextDecryptCount = 10
+-        for (int i = 0; i < mirror_buffer->nextDecryptCount; i++) {
++        consumed = inputLen < mirror_buffer->nextDecryptCount ? inputLen : mirror_buffer->nextDecryptCount;
++        for (int i = 0; i < consumed; i++) {
+             output[i] = (input[i] ^ mirror_buffer->og[(16 - mirror_buffer->nextDecryptCount) + i]);
+         }
++        mirror_buffer->nextDecryptCount -= consumed;
++        if (consumed == inputLen) {
++            return;
++        }
+     }
++    input += consumed;
++    output += consumed;
++    inputLen -= consumed;
+     // Handling encrypted bytes
+     int encryptlen = ((inputLen - mirror_buffer->nextDecryptCount) / 16) * 16;
+     // Aes decryption
+diff --git a/lib/pairing.c b/lib/pairing.c
+index c83200e..7e2b45a 100644
+--- a/lib/pairing.c
++++ b/lib/pairing.c
+@@ -34,6 +34,8 @@ typedef struct srp_s {
+     unsigned char verifier[SRP_VERIFIER_SIZE];
+     unsigned char session_key[SRP_SESSION_KEY_SIZE];
+     unsigned char private_key[SRP_PRIVATE_KEY_SIZE];
++    unsigned char public_key[SRP_PK_SIZE];
++    bool proof_verified;
+ } srp_t;
+ 
+ struct pairing_s {
+@@ -168,12 +170,18 @@ pairing_session_handshake(pairing_session_t *session, const unsigned char ecdh_k
+         return -1;
+     }
+ 
++    x25519_key_destroy(session->ecdh_theirs);
++    ed25519_key_destroy(session->ed_theirs);
++    x25519_key_destroy(session->ecdh_ours);
+     session->ecdh_theirs = x25519_key_from_raw(ecdh_key);
+     session->ed_theirs = ed25519_key_from_raw(ed_key);
+ 
+     session->ecdh_ours = x25519_key_generate();
+ 
+-    x25519_derive_secret(session->ecdh_secret, session->ecdh_ours, session->ecdh_theirs);
++    if (x25519_derive_secret(session->ecdh_secret, session->ecdh_ours, session->ecdh_theirs) < 0) {
++        session->status = STATUS_INITIAL;
++        return -2;
++    }
+ 
+     session->status = STATUS_HANDSHAKE;
+     return 0;
+@@ -500,22 +508,22 @@ random_pin() {
+ int
+ srp_new_user(pairing_session_t *session, pairing_t *pairing, const char *device_id, const char *pin,
+              const char **salt, int *len_salt, const char **pk, int *len_pk) {
++    pairing_session_reset_pin(session);
+     if (strlen(device_id) > SRP_USERNAME_SIZE) {
+         return -1;
+     }
+ 
+     strncpy(session->username, device_id, SRP_USERNAME_SIZE);
+     
+-    if (session->srp) {
+-        free (session->srp);
+-        session->srp = NULL;
+-    }
+     session->srp = (srp_t *) calloc(1, sizeof(srp_t));
+     if (!session->srp) {
+         return -2;
+     }
+ 
+-    get_random_bytes(session->srp->private_key, SRP_PRIVATE_KEY_SIZE);
++    if (get_random_bytes(session->srp->private_key, SRP_PRIVATE_KEY_SIZE) < 1) {
++        pairing_session_reset_pin(session);
++        return -2;
++    }
+     
+     const unsigned char *srp_b = session->srp->private_key;
+     unsigned char * srp_B = NULL;
+@@ -530,7 +538,10 @@ srp_new_user(pairing_session_t *session, pairing_t *pairing, const char *device_
+                                        (const unsigned char **) &srp_s, &len_s,
+                                        (const unsigned char **) &srp_v, &len_v,
+                                        NULL, NULL);
+-    if (len_s != SRP_SALT_SIZE || len_v != SRP_VERIFIER_SIZE) {
++    if (!srp_s || !srp_v || len_s != SRP_SALT_SIZE || len_v != SRP_VERIFIER_SIZE) {
++        free(srp_s);
++        free(srp_v);
++        pairing_session_reset_pin(session);
+         return -3;
+     }
+ 
+@@ -546,7 +557,16 @@ srp_new_user(pairing_session_t *session, pairing_t *pairing, const char *device_
+                                     (const unsigned char **) &srp_B, &len_B,
+                                     NULL, NULL, 1);
+ 
+-    *pk = (char *) srp_B;
++    free(srp_s);
++    free(srp_v);
++    if (!srp_B || len_B <= 0 || (size_t) len_B > sizeof(session->srp->public_key)) {
++        free(srp_B);
++        pairing_session_reset_pin(session);
++        return -3;
++    }
++    memcpy(session->srp->public_key, srp_B, len_B);
++    free(srp_B);
++    *pk = (char *) session->srp->public_key;
+     *len_pk = len_B;
+ 
+     return 0;
+@@ -555,6 +575,11 @@ srp_new_user(pairing_session_t *session, pairing_t *pairing, const char *device_
+ int
+ srp_validate_proof(pairing_session_t *session, pairing_t *pairing, const unsigned char *A,
+                     int len_A, unsigned char *proof, int client_proof_len, int proof_len) {
++    if (!session->srp || session->srp->proof_verified || !A || !proof || len_A <= 0 || len_A > SRP_PK_SIZE ||
++        client_proof_len < SHA_DIGEST_LENGTH || client_proof_len > SRP_M2_SIZE || proof_len != SRP_M2_SIZE) {
++        pairing_session_reset_pin(session);
++        return -1;
++    }
+     int authenticated  = 0;
+     const unsigned char *B =  NULL;
+     const unsigned char *b = session->srp->private_key;
+@@ -571,27 +596,38 @@ srp_validate_proof(pairing_session_t *session, pairing_t *pairing, const unsigne
+                                                     b, len_b,
+                                                     &B, &len_B, NULL, NULL, 1);
+ 
++    if (!verifier) {
++        pairing_session_reset_pin(session);
++        return -1;
++    }
+     srp_verifier_verify_session(verifier, proof, &M2);
+     authenticated = srp_verifier_is_authenticated(verifier);
+     if (authenticated == 0) {
+         /* HTTP 470 should be sent to client if not verified.*/
+         srp_verifier_delete(verifier);
+-        free (session->srp);
+-        session->srp = NULL;
++        pairing_session_reset_pin(session);
+         return -1;
+     }
+     session_key = srp_verifier_get_session_key(verifier, &len_K);
+-    if (len_K != SRP_SESSION_KEY_SIZE) {
++    if (!session_key || !M2 || len_K != SRP_SESSION_KEY_SIZE) {
++        srp_verifier_delete(verifier);
++        pairing_session_reset_pin(session);
+         return -2;
+     }
+     memcpy(session->srp->session_key, session_key, len_K);
+-    memcpy(proof, M2, proof_len);
++    memset(proof, 0, proof_len);
++    memcpy(proof, M2, SHA_DIGEST_LENGTH);
++    session->srp->proof_verified = true;
+     srp_verifier_delete(verifier);
+     return 0;
+ }
+ int
+ srp_confirm_pair_setup(pairing_session_t *session, pairing_t *pairing,
+                        unsigned char *epk, unsigned char *auth_tag) {
++    if (!session->srp || !session->srp->proof_verified) {
++        pairing_session_reset_pin(session);
++        return -1;
++    }
+     unsigned char aesKey[16] = {0}, aesIV[16] = {0};
+     unsigned char hash[SHA512_DIGEST_LENGTH] = {0};
+     unsigned char pk[ED25519_KEY_SIZE] = {0};
+@@ -620,14 +656,13 @@ srp_confirm_pair_setup(pairing_session_t *session, pairing_t *pairing,
+ 
+     /* decrypt client epk to authenticate client using auth_tag */
+     int pk_len_client  = gcm_decrypt(epk, ED25519_KEY_SIZE, pk, aesKey, aesIV, auth_tag);
+-    if (pk_len_client <= 0) {
++    if (pk_len_client != ED25519_KEY_SIZE) {
+        /* authentication failed */
+-         return pk_len_client;
++         return -1;
+     }
+ 
+     /* success, from server viewpoint */
+     memcpy(session->client_pk, pk, ED25519_KEY_SIZE);
+-    session->pair_setup = true;
+ 
+     /* encrypt server epk so client can also authenticate server using auth_tag */
+     pairing_get_public_key(pairing, pk);
+@@ -635,9 +670,23 @@ srp_confirm_pair_setup(pairing_session_t *session, pairing_t *pairing,
+     /* encryption  needs this previously undocumented additional "nonce" */
+     aesIV[15]++;
+     int epk_len = gcm_encrypt(pk, ED25519_KEY_SIZE, epk, aesKey, aesIV, auth_tag);
++    session->pair_setup = (epk_len == ED25519_KEY_SIZE);
+     return epk_len;    
+ }
+ 
++void pairing_session_reset_pin(pairing_session_t *session) {
++    if (session->srp) {
++        memset(session->srp, 0, sizeof(srp_t));
++        free(session->srp);
++        session->srp = NULL;
++    }
++    session->pair_setup = false;
++}
++
++bool pairing_session_is_pin_paired(pairing_session_t *session, const unsigned char *pk) {
++    return session->pair_setup && !memcmp(session->client_pk, pk, ED25519_KEY_SIZE);
++}
++
+ void get_pairing_session_client_data(pairing_session_t *session, char **username, char **client_pk64) {
+     int len64 = 4 * (1 + (ED25519_KEY_SIZE / 3)) + 1;
+     *username = session->username;
+diff --git a/lib/pairing.h b/lib/pairing.h
+index cdb1374..f8e62ea 100644
+--- a/lib/pairing.h
++++ b/lib/pairing.h
+@@ -41,6 +41,8 @@ void pairing_get_public_key(pairing_t *pairing, unsigned char public_key[ED25519
+ 
+ pairing_session_t *pairing_session_init(pairing_t *pairing);
+ void pairing_session_set_setup_status(pairing_session_t *session);
++void pairing_session_reset_pin(pairing_session_t *session);
++bool pairing_session_is_pin_paired(pairing_session_t *session, const unsigned char *pk);
+ int pairing_session_check_handshake_status(pairing_session_t *session);
+ int pairing_session_handshake(pairing_session_t *session, const unsigned char ecdh_key[X25519_KEY_SIZE],
+                               const unsigned char ed_key[ED25519_KEY_SIZE]);
+diff --git a/lib/raop.c b/lib/raop.c
+index b0ff5b5..256c0a8 100644
+--- a/lib/raop.c
++++ b/lib/raop.c
+@@ -77,6 +77,9 @@ struct raop_s {
+      /* for temporary storage of pin during pair-pin start */
+     unsigned short pin;
+     bool use_pin;
++    unsigned int pin_generation;
++    unsigned int pin_failures;
++    unsigned int pin_failure_delay;
+   
+      /* public key as string */
+     char pk_str[2*ED25519_KEY_SIZE + 1];
+@@ -119,6 +122,9 @@ struct raop_conn_s {
+ 
+     char *client_session_id;
+     bool authenticated;
++    bool pin_verified;
++    bool pin_verify_pending;
++    unsigned int pin_generation;
+     bool have_active_remote;
+ 
+     /* AirSpoon: приложению сообщено о соединении (conn_init callback) */
+@@ -126,6 +132,40 @@ struct raop_conn_s {
+ };
+ typedef struct raop_conn_s raop_conn_t;
+ 
++static bool
++same_remote(const raop_conn_t *a, const raop_conn_t *b) {
++    return a->remotelen == b->remotelen && a->zone_id == b->zone_id &&
++           !memcmp(a->remote, b->remote, a->remotelen);
++}
++
++static bool
++pin_authorized(raop_conn_t *conn, bool airplay_video) {
++    raop_t *raop = conn->raop;
++    if (!raop->use_pin || conn->pin_verified) return true;
++    if (airplay_video) {
++        raop_conn_t *peer;
++        for (int i = 1; (peer = httpd_get_connection_by_type(raop->httpd, CONNECTION_TYPE_RAOP, i)); i++) {
++            if (peer->pin_verified && same_remote(conn, peer)) return true;
++        }
++    }
++    return false;
++}
++
++static bool
++claim_raop_connection(raop_conn_t *conn, bool ble) {
++    raop_t *raop = conn->raop;
++    if (httpd_count_connection_type(raop->httpd, CONNECTION_TYPE_RAOP)) {
++        if (!httpd_nohold(raop->httpd) || ble) return false;
++        httpd_remove_known_connections(raop->httpd);
++        if (raop->callbacks.video_reset) {
++            raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_NOHOLD);
++        }
++    }
++    httpd_set_connection_type(raop->httpd, conn, CONNECTION_TYPE_RAOP);
++    conn->connection_type = CONNECTION_TYPE_RAOP;
++    return true;
++}
++
+ #include "raop_handlers.h"
+ #include "http_handlers.h"
+ 
+@@ -291,27 +331,50 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+      * (409 для настоящего подключения). Тип дадим на первом настоящем запросе. */
+     bool probe_only = probe && !ble && !client_session_id;
+ 
++    bool authorized = pin_authorized(conn, !cseq && client_session_id && !strcmp(protocol, "HTTP/1.1"));
++    bool pairing_request = !strcmp(method, "POST") &&
++        (!strcmp(url, "/pair-pin-start") || !strcmp(url, "/pair-setup") ||
++         !strcmp(url, "/pair-setup-pin") || !strcmp(url, "/pair-verify") ||
++         !strcmp(url, "/fp-setup") || !strcmp(url, "/fp-setup2") || !strcmp(url, "/feedback"));
++    bool public_request = !strcmp(method, "OPTIONS") || pairing_request ||
++        /* /command has no handler here: retain its no-op reply before pairing. */
++        (!strcmp(method, "POST") && !strcmp(url, "/command")) ||
++        (!strcmp(method, "GET") && (!strcmp(url, "/info") || !strncmp(url, "/info?", 6) ||
++                                   !strcmp(url, "/server-info")));
++    /* Internal playlist GETs are local only; a forged Host header is not authorization. */
++    static const unsigned char loopback4[4] = {127, 0, 0, 1};
++    static const unsigned char loopback6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
++    bool local_hls = hls_request && !strcmp(method, "GET") &&
++        ((conn->remotelen == 4 && !memcmp(conn->remote, loopback4, 4)) ||
++         (conn->remotelen == 16 && !memcmp(conn->remote, loopback6, 16)));
++    if (!authorized && !public_request && !local_hls) {
++        *response = http_response_create();
++        http_response_init(*response, protocol, 470, "Client Authentication Failure");
++        goto finish;
++    }
++    bool video_control = (!strcmp(method, "POST") &&
++        (!strcmp(url, "/stop") || !strncmp(url, "/rate?", 6) || !strncmp(url, "/scrub?", 7) ||
++         !strcmp(url, "/action"))) || (!strcmp(method, "PUT") && !strncmp(url, "/setProperty?", 13));
++    raop_conn_t *video_conn = raop->video_play_conn;
++    if (video_control && (!video_conn ||
++        (conn != video_conn && (!client_session_id || !video_conn->client_session_id ||
++         strcmp(client_session_id, video_conn->client_session_id) || !same_remote(conn, video_conn))))) {
++        *response = http_response_create();
++        http_response_init(*response, protocol, 470, "Client Authentication Failure");
++        goto finish;
++    }
++
+     if (conn->connection_type == CONNECTION_TYPE_UNKNOWN && !probe_only) {
+         if (cseq || ble) {
+-            if (httpd_count_connection_type(raop->httpd, CONNECTION_TYPE_RAOP)) {
+-                char ipaddr[40] = { '\0' };
+-                utils_ipaddress_to_string(conn->remotelen, conn->remote, conn->zone_id, ipaddr, (int) (sizeof(ipaddr)));
+-                if (httpd_nohold(raop->httpd) && !ble) {
+-                    logger_log(raop->logger, LOGGER_INFO, "*****\"nohold\" feature: switch to new connection request from %s", ipaddr);		  
+-                    httpd_remove_known_connections(raop->httpd);
+-                    if (raop->callbacks.video_reset) {
+-                        raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_NOHOLD);
+-                    }
+-                } else {
+-                    logger_log(raop->logger, LOGGER_WARNING, "rejecting new connection request from %s", ipaddr);
+-                    *response = http_response_create();
+-                    http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
+-                    goto finish;
+-                }
++            /* PIN pairing must finish before nohold can evict the current client.
++             * Keep the new connection unclassified until pair-verify succeeds. */
++            if (!authorized) goto connection_identified;
++            if (!claim_raop_connection(conn, ble)) {
++                *response = http_response_create();
++                http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
++                goto finish;
+             }
+             logger_log(raop->logger, LOGGER_DEBUG, "New connection %p identified as Connection type RAOP", ptr);
+-            httpd_set_connection_type(raop->httpd, ptr, CONNECTION_TYPE_RAOP);
+-            conn->connection_type = CONNECTION_TYPE_RAOP;
+         } else if (client_session_id) {
+             logger_log(raop->logger, LOGGER_DEBUG, "New connection %p identified as Connection type AirPlay", ptr);            
+             httpd_set_connection_type(raop->httpd, ptr, CONNECTION_TYPE_AIRPLAY);
+@@ -321,7 +384,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+             memcpy(conn->client_session_id, client_session_id, strlen(client_session_id));
+             /* airplay video has been requested: shut down any running RAOP udp services */
+             raop_conn_t *raop_conn = (raop_conn_t *) httpd_get_connection_by_type(raop->httpd, CONNECTION_TYPE_RAOP, 1);
+-            if (raop_conn) {
++            if (raop_conn && authorized && same_remote(conn, raop_conn)) {
+                 raop_rtp_mirror_t *raop_rtp_mirror = raop_conn->raop_rtp_mirror;
+                 if (raop_rtp_mirror) {
+                     logger_log(raop->logger, LOGGER_DEBUG, "New AirPlay connection: stopping RAOP mirror"
+@@ -352,11 +415,12 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+         }
+     }
+ 
++ connection_identified:
+     /* AirSpoon: о подключении сообщаем приложению только на первом настоящем запросе
+      * сессии (pair-setup, fp-setup, SETUP и т.д.), который приёмник принял. Опрос
+      * (GET /info, OPTIONS) и отклонённые запросы (400, 409, ранний выход выше) сессией
+      * не считаются, и их закрытие не трогает идущий показ (см. conn_destroy). */
+-    if (!conn->announced && !probe) {
++    if (!conn->announced && !probe && authorized) {
+         conn->announced = true;
+         if (raop->callbacks.conn_init) {
+             raop->callbacks.conn_init(raop->callbacks.cls);
+@@ -372,7 +436,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+ 	    http_response_add_header(*response, "Audio-Jack-Status", "connected; type=digital");
+     }
+ 
+-    if (!conn->have_active_remote) {
++    if (!conn->have_active_remote && authorized) {
+         const char *active_remote = http_request_get_header(request, "Active-Remote");
+         if (active_remote) {
+             conn->have_active_remote = true;
+@@ -516,6 +580,15 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+ 
+     if (handler != NULL) {
+         handler(conn, request, *response, &response_data, &response_datalen);
++        if (handler == &raop_handler_pairverify && conn->pin_verified &&
++            conn->connection_type == CONNECTION_TYPE_UNKNOWN && cseq) {
++            /* Publish the verified RAOP peer now: /play may be the next request,
++             * on a separate HTTP connection with no intervening RTSP SETUP. */
++            if (!claim_raop_connection(conn, false)) {
++                conn->pin_verified = false;
++                http_response_init(*response, protocol, 409, "Conflict: Server is connected to another client");
++            }
++        }
+     } else {
+         logger_log(raop->logger, LOGGER_INFO,
+                    "Unhandled Client Request: %s %s %s", method, url, protocol);
+@@ -747,7 +820,9 @@ void
+ raop_destroy(raop_t *raop) {
+     if (raop) {
+         raop_destroy_airplay_video(raop, -1);
+-        raop_stop_httpd(raop);
++        if (raop->httpd) {
++            raop_stop_httpd(raop);
++        }
+         pairing_destroy(raop->pairing);
+         httpd_destroy(raop->httpd);
+         logger_destroy(raop->logger);
+diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
+index b3f3b17..cd883fd 100644
+--- a/lib/raop_handlers.h
++++ b/lib/raop_handlers.h
+@@ -281,6 +281,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+     const char *request_data = NULL;;
+     int request_datalen = 0;
+     bool data_is_plist = false;
++    bool proof_request = false;
+     bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
+     request_data = http_request_get_data(request, &request_datalen);
+     logger_log(raop->logger, LOGGER_INFO, "client requested pair-setup-pin, datalen = %d", request_datalen);
+@@ -308,6 +309,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+     plist_t req_authtag_node = plist_dict_get_item(req_root_node, "authTag");
+   
+     if (PLIST_IS_STRING(req_method_node) && PLIST_IS_STRING(req_user_node)) {
++        conn->pin_verified = false;
++        conn->pin_verify_pending = false;
+         /* this is the initial pair-setup-pin request */
+         const char *salt = NULL;
+         char pin[6] = { '\0' };
+@@ -316,17 +319,18 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         char *method = NULL;
+         char *user = NULL;
+         plist_get_string_val(req_method_node, &method);
+-        if (strncmp(method, "pin", strlen (method))) {
++        if (strcmp(method, "pin")) {
+             logger_log(raop->logger, LOGGER_ERR, "error, required method is \"pin\", client requested \"%s\"", method);
+             free (method);
+             plist_free (req_root_node);
+-            return;
++            goto authentication_failed;
+         }
+         plist_mem_free(method);
+         method = NULL;
+         plist_get_string_val(req_user_node, &user);
+         logger_log(raop->logger, LOGGER_INFO, "pair-setup-pin:  device_id = %s", user);
+         snprintf(pin, 6, "%04u", raop->pin % 10000);
++        conn->pin_generation = raop->pin_generation;
+         if (raop->pin < 10000) {
+             raop->pin = 0;
+         }
+@@ -350,6 +354,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         return;
+     } else if (PLIST_IS_DATA(req_pk_node) && PLIST_IS_DATA(req_proof_node)) {
+         /* this is the second part of pair-setup-pin request */
++        proof_request = true;
+         char *client_pk = NULL;
+         char *client_proof = NULL;
+         unsigned char proof[64] = { '\0' };
+@@ -358,7 +363,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         uint64_t client_proof_len = 0;
+         plist_get_data_val(req_pk_node, &client_pk, &client_pk_len); 
+         plist_get_data_val(req_proof_node, &client_proof, &client_proof_len);
+-        if (client_proof_len > sizeof(proof)) {
++        if (conn->pin_generation != raop->pin_generation ||
++            !client_pk || !client_proof || client_pk_len == 0 || client_pk_len > SRP_PK_SIZE ||
++            client_proof_len < 20 || client_proof_len > sizeof(proof)) {
+             logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client_proof_len %d invalid)", (int) client_proof_len);
+             free (client_proof);
+             free (client_pk);
+@@ -380,6 +387,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+             logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client proof not validated)");
+             goto authentication_failed;
+         }
++        raop->pin_failures = 0;
++        raop->pin_failure_delay = 0;
+         if (logger_debug) {
+ 	    char *str = utils_data_to_string((const unsigned char *) proof, sizeof(proof), 20);
+             logger_log(raop->logger, LOGGER_DEBUG, "server SRP6a proof <M1> :\n%s", str);
+@@ -404,6 +413,14 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         plist_get_data_val(req_epk_node, &client_epk, &client_epk_len); 
+         plist_get_data_val(req_authtag_node, &client_authtag, &client_authtag_len);
+ 
++        if (conn->pin_generation != raop->pin_generation ||
++            !client_epk || !client_authtag || client_epk_len != sizeof(epk) || client_authtag_len != sizeof(authtag)) {
++            free(client_epk);
++            free(client_authtag);
++            plist_free(req_root_node);
++            goto authentication_failed;
++        }
++
+         if (logger_debug) {
+             char *str = utils_data_to_string((const unsigned char *) client_epk, client_epk_len, 16);
+             logger_log(raop->logger, LOGGER_DEBUG, "client_epk %d:\n%s\n", (int) client_epk_len, str);
+@@ -418,7 +435,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         free (client_epk);
+         plist_free(req_root_node);
+         ret = srp_confirm_pair_setup(conn->session, raop->pairing, epk, authtag);
+-        if (ret < 0) {
++        if (ret != ED25519_KEY_SIZE) {
+             logger_log(raop->logger, LOGGER_ERR, "pair-pin-setup (step 3): client authentication failed\n");
+             goto authentication_failed;
+         } else {
+@@ -435,7 +452,38 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+         http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
+         return;
+     }
++    plist_free(req_root_node);
+  authentication_failed:;
++    /* httpd serializes pairing requests: these counters span all connections. */
++    if (raop->use_pin && proof_request) {
++        raop->pin_failures++;
++        if (raop->pin_failure_delay < 10) raop->pin_failure_delay++;
++        if (raop->pin_failures >= 5) {
++            int pin = random_pin();
++            while (pin >= 0 && pin == raop->pin % 10000) pin = random_pin();
++            if (pin >= 0) {
++                raop->pin = pin + 10000;
++                raop->pin_generation++;
++                raop->pin_failures = 0;
++                char displayed_pin[5];
++                snprintf(displayed_pin, sizeof(displayed_pin), "%04u", raop->pin % 10000);
++                if (raop->callbacks.display_pin) {
++                    raop->callbacks.display_pin(raop->callbacks.cls, displayed_pin);
++                }
++            } else {
++                logger_log(raop->logger, LOGGER_ERR, "Failed to rotate PIN");
++            }
++        }
++#ifdef WIN32
++        Sleep(1000 * raop->pin_failure_delay);
++#else
++        unsigned int remaining = raop->pin_failure_delay;
++        while ((remaining = sleep(remaining))) {}
++#endif
++    }
++    pairing_session_reset_pin(conn->session);
++    conn->pin_verified = false;
++    conn->pin_verify_pending = false;
+     http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
+ }
+ 
+@@ -473,10 +521,8 @@ raop_handler_pairverify(raop_conn_t *conn,
+                         char **response_data, int *response_datalen)
+ {
+     raop_t *raop = conn->raop;
+-    bool register_check = false;  
+     if (pairing_session_check_handshake_status(conn->session)) {
+         pairing_session_set_setup_status(conn->session);
+-        register_check = raop->use_pin;
+     }
+     unsigned char public_key[X25519_KEY_SIZE];
+     unsigned char signature[PAIRING_SIG_SIZE];
+@@ -486,37 +532,41 @@ raop_handler_pairverify(raop_conn_t *conn,
+     data = (unsigned char *) http_request_get_data(request, &datalen);
+     if (datalen < 4) {
+         logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
+-        return;
++        goto verification_failed;
+     }
+     switch (data[0]) {
+     case 1:
++        conn->pin_verified = false;
++        conn->pin_verify_pending = false;
+         if (datalen != 4 + X25519_KEY_SIZE + ED25519_KEY_SIZE) {
+             logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
+-            return;
++            goto verification_failed;
++        }
++        if (raop->use_pin) {
++            const unsigned char *pk = data + 4 + X25519_KEY_SIZE;
++            bool registered_client = pairing_session_is_pin_paired(conn->session, pk);
++            if (!registered_client && raop->callbacks.check_register) {
++                char *pk64 = NULL;
++                ed25519_pk_to_base64(pk, &pk64);
++                registered_client = raop->callbacks.check_register(raop->callbacks.cls, pk64);
++                free(pk64);
++            }
++            if (!registered_client) {
++                goto verification_failed;
++            }
++            conn->pin_verify_pending = true;
+         }
+-        /* We can fall through these errors, the result will just be garbage... */
+         if (pairing_session_handshake(conn->session, data + 4, data + 4 + X25519_KEY_SIZE)) {
+             logger_log(raop->logger, LOGGER_ERR, "Error initializing pair-verify handshake");
++            goto verification_failed;
+         }
+         if (pairing_session_get_public_key(conn->session, public_key)) {
+             logger_log(raop->logger, LOGGER_ERR, "Error getting ECDH public key");
++            goto verification_failed;
+         }
+         if (pairing_session_get_signature(conn->session, signature)) {
+             logger_log(raop->logger, LOGGER_ERR, "Error getting ED25519 signature");
+-        }
+-        if (register_check) {
+-            bool registered_client = true;
+-            if (raop->callbacks.check_register) {
+-                const unsigned char *pk = data + 4 + X25519_KEY_SIZE;
+-                char *pk64 = NULL;
+-                ed25519_pk_to_base64(pk, &pk64);
+-                registered_client = raop->callbacks.check_register(raop->callbacks.cls, pk64);
+-                free (pk64);
+-            }
+-
+-            if (!registered_client) {
+-                return;
+-            }
++            goto verification_failed;
+         }
+         *response_data = calloc(1, sizeof(public_key) + sizeof(signature));
+         if (*response_data) {
+@@ -530,18 +580,29 @@ raop_handler_pairverify(raop_conn_t *conn,
+         logger_log(raop->logger, LOGGER_DEBUG, "2nd pair-verify step: checking signature");
+         if (datalen != 4 + PAIRING_SIG_SIZE) {
+             logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
+-            return;
++            goto verification_failed;
+         }
+ 
+-        if (pairing_session_finish(conn->session, data + 4)) {
++        if ((raop->use_pin && !conn->pin_verify_pending) || pairing_session_finish(conn->session, data + 4)) {
+             logger_log(raop->logger, LOGGER_ERR, "Incorrect pair-verify signature");
+-            http_response_set_disconnect(response, 1);
+-            return;
++            goto verification_failed;
+         }
++        conn->pin_verified = conn->pin_verify_pending;
++        conn->pin_verify_pending = false;
+         logger_log(raop->logger, LOGGER_DEBUG, "pair-verify: signature is verified");	    
+         http_response_add_header(response, "Content-Type", "application/octet-stream");
+         break;
++    default:
++        goto verification_failed;
+     }
++    return;
++
++ verification_failed:
++    conn->pin_verified = false;
++    conn->pin_verify_pending = false;
++    pairing_session_reset_pin(conn->session);
++    http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
++    http_response_set_disconnect(response, 1);
+ }
+ 
+ static void
+@@ -626,8 +687,19 @@ raop_handler_setup(raop_conn_t *conn,
+     // For the response
+     plist_t res_root_node = plist_new_dict();
+ 
++    if (!PLIST_IS_DICT(req_root_node) ||
++        ((req_eiv_node || req_ekey_node) && (!PLIST_IS_DATA(req_eiv_node) || !PLIST_IS_DATA(req_ekey_node)))) {
++        goto invalid_setup;
++    }
++
+     if (PLIST_IS_DATA(req_eiv_node) && PLIST_IS_DATA(req_ekey_node)) {
+         // The first SETUP call that initializes keys and timing
++        if (conn->raop_ntp || conn->raop_rtp || conn->raop_rtp_mirror) {
++            http_response_init(response, "RTSP/1.0", 455, "Method Not Valid in This State");
++            plist_free(req_root_node);
++            plist_free(res_root_node);
++            return;
++        }
+ 
+         unsigned char aesiv[16] = { 0 };
+         unsigned char aeskey[16] = { 0 };
+@@ -779,6 +851,10 @@ raop_handler_setup(raop_conn_t *conn,
+         }
+ 
+         plist_get_data_val(req_eiv_node, &eiv, &eiv_len);
++        if (!eiv || eiv_len != sizeof(aesiv)) {
++            free(eiv);
++            goto invalid_setup;
++        }
+         memcpy(aesiv, eiv, 16);
+         free(eiv);	
+         logger_log(raop->logger, LOGGER_DEBUG, "eiv_len = %llu", eiv_len);
+@@ -791,6 +867,10 @@ raop_handler_setup(raop_conn_t *conn,
+         char* ekey = NULL;
+         uint64_t ekey_len = 0;
+         plist_get_data_val(req_ekey_node, &ekey, &ekey_len);
++        if (!ekey || ekey_len != sizeof(eaeskey)) {
++            free(ekey);
++            goto invalid_setup;
++        }
+         memcpy(eaeskey,ekey,72);
+         free(ekey);
+         logger_log(raop->logger, LOGGER_DEBUG, "ekey_len = %llu", ekey_len);
+@@ -802,6 +882,12 @@ raop_handler_setup(raop_conn_t *conn,
+         }
+         int ret = fairplay_decrypt(conn->fairplay, (unsigned char*) eaeskey, aeskey);
+         logger_log(raop->logger, LOGGER_DEBUG, "fairplay_decrypt ret = %d", ret);
++        if (ret != 0) {
++            http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
++            plist_free(req_root_node);
++            plist_free(res_root_node);
++            return;
++        }
+         if (logger_debug) {
+             char *str = utils_data_to_string(aeskey, 16, 16);
+             logger_log(raop->logger, LOGGER_DEBUG, "16 byte aeskey (fairplay-decrypted from ekey):\n%s", str);
+@@ -959,7 +1045,13 @@ raop_handler_setup(raop_conn_t *conn,
+                            " key and iv): %llu", stream_connection_id);
+ 
+                 if (conn->raop_rtp_mirror) {
+-                    raop_rtp_mirror_init_aes(conn->raop_rtp_mirror, &stream_connection_id);
++                    if (raop_rtp_mirror_init_aes(conn->raop_rtp_mirror, &stream_connection_id) < 0) {
++                        http_response_init(response, "RTSP/1.0", 455, "Method Not Valid in This State");
++                        plist_free(res_streams_node);
++                        plist_free(req_root_node);
++                        plist_free(res_root_node);
++                        return;
++                    }
+                     raop_rtp_mirror_start(conn->raop_rtp_mirror, &dport, raop->clientFPSdata);
+                     logger_log(raop->logger, LOGGER_DEBUG, "Mirroring initialized successfully");
+                 } else {
+@@ -1060,6 +1152,12 @@ raop_handler_setup(raop_conn_t *conn,
+     plist_free(res_root_node);
+     plist_free(req_root_node);
+     http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
++    return;
++
++ invalid_setup:
++    plist_free(req_root_node);
++    plist_free(res_root_node);
++    http_response_init(response, "RTSP/1.0", 400, "Bad Request");
+ }
+ 
+ static void
+diff --git a/lib/raop_rtp_mirror.c b/lib/raop_rtp_mirror.c
+index 2efee1b..d557a83 100644
+--- a/lib/raop_rtp_mirror.c
++++ b/lib/raop_rtp_mirror.c
+@@ -166,10 +166,21 @@ raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *call
+     return raop_rtp_mirror;
+ }
+ 
+-void
++int
+ raop_rtp_mirror_init_aes(raop_rtp_mirror_t *raop_rtp_mirror, uint64_t *streamConnectionID)
+ {
++    MUTEX_LOCK(raop_rtp_mirror->run_mutex);
++    if (raop_rtp_mirror->running) {
++        MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
++        return -1;
++    }
++    MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
++    /* Reap a worker that exited (e.g. unsupported codec), before reusing AES. */
++    raop_rtp_mirror_stop(raop_rtp_mirror);
++    MUTEX_LOCK(raop_rtp_mirror->run_mutex);
+     mirror_buffer_init_aes(raop_rtp_mirror->buffer, streamConnectionID);
++    MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
++    return 0;
+ }
+ 
+ #define RAOP_PACKET_LEN 32768
+@@ -324,6 +335,10 @@ raop_rtp_mirror_thread(void *arg)
+ 
+             /*packet[0:3] contains the payload size */
+             int payload_size = byteutils_get_int(packet, 0);
++            if (payload_size < 0) {
++                conn_reset = true;
++                break;
++            }
+             char packet_description[13] = {0};
+             char *p = packet_description;
+             int n = sizeof(packet_description);
+@@ -368,6 +383,10 @@ raop_rtp_mirror_thread(void *arg)
+ 
+             if (payload == NULL) {
+                 payload = malloc(payload_size);
++                if (payload_size && !payload) {
++                    conn_reset = true;
++                    break;
++                }
+                 readstart = 0;
+             }
+ 
+@@ -460,10 +479,14 @@ raop_rtp_mirror_thread(void *arg)
+                 int nalu_size = 0;
+                 int nalus_count = 0;
+                 while (nalu_size < payload_size) {
++                    if (payload_size - nalu_size < 4) {
++                        valid_data = false;
++                        break;
++                    }
+                     int nc_len = byteutils_get_int_be(payload_decrypted, nalu_size);
+                     /* nc_len is read from the payload, so it is only a
+                      * length if the unit it claims fits in what is left. */
+-                    if (nc_len < 0 || nalu_size + 4 > payload_size ||
++                    if (nc_len <= 0 || nalu_size + 4 > payload_size ||
+                         nc_len > payload_size - nalu_size - 4) {
+                         valid_data = false;
+                         break;
+@@ -627,6 +650,11 @@ raop_rtp_mirror_thread(void *arg)
+                     free(sps_pps);
+                     sps_pps = NULL;
+                 }
++                prepend_sps_pps = false;
++                if (payload_size < 8) {
++                    conn_reset = true;
++                    break;
++                }
+                 /* test for a H265 VPS/SPS/PPS */
+                 unsigned char hvc1[] = { 0x68, 0x76, 0x63, 0x31 };
+ 
+@@ -651,6 +679,10 @@ raop_rtp_mirror_thread(void *arg)
+                     unsigned char sps_start_code[] = { 0xa1, 0x00, 0x01, 0x00 };
+                     unsigned char pps_start_code[] = { 0xa2, 0x00, 0x01, 0x00 };
+ 
++                    if (payload_size < 0x75 + 5) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char * ptr = payload + 0x75;
+  
+                     if (memcmp(ptr, vps_start_code, 4)) {
+@@ -658,8 +690,12 @@ raop_rtp_mirror_thread(void *arg)
+                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
+                         break;
+                     }
+-                    short vps_size = byteutils_get_short_be(ptr, 3);
++                    unsigned short vps_size = (unsigned short) byteutils_get_short_be(ptr, 3);
+                     ptr += 5;
++                    if (vps_size > payload_size - (ptr - payload)) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char *vps = ptr;
+                     if (logger_debug) {
+                         char *str = utils_data_to_string(vps, vps_size, 16);
+@@ -667,13 +703,21 @@ raop_rtp_mirror_thread(void *arg)
+                         free(str);
+                     }
+                     ptr += vps_size;
++                    if (payload_size - (ptr - payload) < 5) {
++                        conn_reset = true;
++                        break;
++                    }
+                     if (memcmp(ptr, sps_start_code, 4)) {
+                         logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "non-conforming HEVC VPS/SPS/PPS payload (SPS)");
+                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
+                         break;
+                     }
+-                    short sps_size = byteutils_get_short_be(ptr, 3);
++                    unsigned short sps_size = (unsigned short) byteutils_get_short_be(ptr, 3);
+                     ptr += 5;
++                    if (sps_size > payload_size - (ptr - payload)) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char *sps = ptr;
+                     if (logger_debug) {
+                         char *str = utils_data_to_string(sps, sps_size, 16);
+@@ -681,13 +725,21 @@ raop_rtp_mirror_thread(void *arg)
+                         free(str);
+                     }
+                     ptr += sps_size;
++                    if (payload_size - (ptr - payload) < 5) {
++                        conn_reset = true;
++                        break;
++                    }
+                     if (memcmp(ptr, pps_start_code, 4)) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "non-conforming HEVC VPS/SPS/PPS payload (PPS)");			
+                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
+                         break;
+                     }
+-                    short pps_size = byteutils_get_short_be(ptr, 3);
++                    unsigned short pps_size = (unsigned short) byteutils_get_short_be(ptr, 3);
+                     ptr += 5;
++                    if (pps_size > payload_size - (ptr - payload)) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char *pps = ptr;
+                     if (logger_debug) {
+                         char *str = utils_data_to_string(pps, pps_size, 16);
+@@ -697,7 +749,10 @@ raop_rtp_mirror_thread(void *arg)
+ 
+                     sps_pps_len = vps_size + sps_size + pps_size + 12;
+                     sps_pps = (unsigned char*) malloc(sps_pps_len);
+-                    assert(sps_pps);
++                    if (!sps_pps) {
++                        conn_reset = true;
++                        break;
++                    }
+                     ptr = sps_pps;
+                     memcpy(ptr, nal_start_code, 4);
+                     ptr += 4;
+@@ -726,9 +781,21 @@ raop_rtp_mirror_thread(void *arg)
+                         conn_reset = true;
+                         break;
+                     }
+-                    short sps_size = byteutils_get_short_be(payload,6);
++                    if (payload_size < 11) {
++                        conn_reset = true;
++                        break;
++                    }
++                    unsigned short sps_size = (unsigned short) byteutils_get_short_be(payload,6);
++                    if (sps_size > payload_size - 11) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char *sequence_parameter_set = payload + 8;
+-                    short pps_size = byteutils_get_short_be(payload, sps_size + 9);
++                    unsigned short pps_size = (unsigned short) byteutils_get_short_be(payload, sps_size + 9);
++                    if (pps_size > payload_size - sps_size - 11) {
++                        conn_reset = true;
++                        break;
++                    }
+                     unsigned char *picture_parameter_set = payload + sps_size + 11;
+                     int data_size = 6;
+                     if (logger_debug) {
+@@ -758,7 +825,10 @@ raop_rtp_mirror_thread(void *arg)
+                     // Copy the sps and pps into a buffer to prepend to the next NAL unit.
+                     sps_pps_len = sps_size + pps_size + 8;
+                     sps_pps = (unsigned char*) malloc(sps_pps_len);
+-                    assert(sps_pps);
++                    if (!sps_pps) {
++                        conn_reset = true;
++                        break;
++                    }
+                     memcpy(sps_pps, nal_start_code, 4);
+                     memcpy(sps_pps + 4, sequence_parameter_set, sps_size);
+                     memcpy(sps_pps + sps_size + 4, nal_start_code, 4); 
+@@ -830,11 +900,13 @@ raop_rtp_mirror_thread(void *arg)
+             payload = NULL;
+             memset(packet, 0, 128);
+             readstart = 0;
+-            if (unsupported_codec) {
++            if (unsupported_codec || conn_reset) {
+                 break;
+             }
+         }
+     }
++    free(payload);
++    free(sps_pps);
+     /* Close the stream file descriptor */
+     if (stream_fd != -1) {
+         CLOSESOCKET(stream_fd);
+@@ -854,8 +926,7 @@ raop_rtp_mirror_thread(void *arg)
+     }
+ 
+     if (unsupported_codec) {
+-        CLOSESOCKET(raop_rtp_mirror->mirror_data_sock);
+-        raop_rtp_mirror_stop(raop_rtp_mirror);
++        /* The owner must join this thread before closing the listening socket. */
+         raop_rtp_mirror->callbacks.video_reset(raop_rtp_mirror->callbacks.cls, RESET_TYPE_RTP_SHUTDOWN);
+     }
+ 
+@@ -904,6 +975,11 @@ raop_rtp_mirror_start(raop_rtp_mirror_t *raop_rtp_mirror, unsigned short *mirror
+     raop_rtp_mirror->show_client_FPS_data = show_client_FPS_data;
+ 
+     MUTEX_LOCK(raop_rtp_mirror->run_mutex);
++    if (!raop_rtp_mirror->running && !raop_rtp_mirror->joined) {
++        MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
++        raop_rtp_mirror_stop(raop_rtp_mirror);
++        MUTEX_LOCK(raop_rtp_mirror->run_mutex);
++    }
+     if (raop_rtp_mirror->running || !raop_rtp_mirror->joined) {
+         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
+         return;
+@@ -929,17 +1005,25 @@ raop_rtp_mirror_start(raop_rtp_mirror_t *raop_rtp_mirror, unsigned short *mirror
+         raop_rtp_mirror->callbacks.mirror_video_running(raop_rtp_mirror->callbacks.cls, true);
+     }
+ 
+-    THREAD_CREATE(raop_rtp_mirror->thread_mirror, raop_rtp_mirror_thread, raop_rtp_mirror);
++    if (pthread_create(&raop_rtp_mirror->thread_mirror, NULL, raop_rtp_mirror_thread, raop_rtp_mirror)) {
++        raop_rtp_mirror->running = 0;
++        raop_rtp_mirror->joined = 1;
++        CLOSESOCKET(raop_rtp_mirror->mirror_data_sock);
++        raop_rtp_mirror->mirror_data_sock = -1;
++        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "Failed to create mirror thread");
++        if (raop_rtp_mirror->callbacks.mirror_video_running) {
++            raop_rtp_mirror->callbacks.mirror_video_running(raop_rtp_mirror->callbacks.cls, false);
++        }
++    }
+     MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
+ }
+ 
+ void raop_rtp_mirror_stop(raop_rtp_mirror_t *raop_rtp_mirror) {
+     assert(raop_rtp_mirror);
+ 
+-    /* Check that we are running and thread is not
+-     * joined (should never be while still running) */
++    /* A worker may clear running before its callbacks and cleanup finish. */
+     MUTEX_LOCK(raop_rtp_mirror->run_mutex);
+-    if (!raop_rtp_mirror->running || raop_rtp_mirror->joined) {
++    if (raop_rtp_mirror->joined) {
+         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
+         return;
+     }
+diff --git a/lib/raop_rtp_mirror.h b/lib/raop_rtp_mirror.h
+index 2e7914d..83485a7 100644
+--- a/lib/raop_rtp_mirror.h
++++ b/lib/raop_rtp_mirror.h
+@@ -27,7 +27,7 @@ typedef struct h264codec_s h264codec_t;
+ 
+ raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *callbacks, raop_ntp_t *ntp,
+                                         const char *remote, int remotelen, const unsigned char *aeskey);
+-void raop_rtp_mirror_init_aes(raop_rtp_mirror_t *raop_rtp_mirror, uint64_t *streamConnectionID);
++int raop_rtp_mirror_init_aes(raop_rtp_mirror_t *raop_rtp_mirror, uint64_t *streamConnectionID);
+ void raop_rtp_mirror_start(raop_rtp_mirror_t *raop_rtp_mirror, unsigned short *mirror_data_lport, uint8_t show_client_FPS_data);
+ void raop_rtp_mirror_stop(raop_rtp_mirror_t *raop_rtp_mirror);
+ void raop_rtp_mirror_destroy(raop_rtp_mirror_t *raop_rtp_mirror);
