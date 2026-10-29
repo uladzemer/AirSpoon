@@ -86,7 +86,8 @@ type Capturer struct {
 	interval time.Duration
 	adapter  string
 	monitor  string
-	luid     LUID // видеокарта, на которой создано устройство D3D11
+	rotation uint32 // DXGI_MODE_ROTATION последнего выбранного выхода
+	luid     LUID   // видеокарта, на которой создано устройство D3D11
 
 	// В системе больше одной настоящей видеокарты: тогда DXGI_ERROR_UNSUPPORTED
 	// при самом первом открытии дублирования — признак «процесс на одной карте,
@@ -94,8 +95,8 @@ type Capturer struct {
 	hybrid      bool
 	basic       bool        // монитор на программном адаптере (Basic Render)
 	remoteFn    func() bool // подмена isRemoteSession для тестов
-	unsupported int      // подряд неудачных открытий с DXGI_ERROR_UNSUPPORTED
-	badSince    time.Time // после первого кадра: с какого момента подряд UNSUPPORTED/NOT_FOUND
+	unsupported int         // подряд неудачных открытий с DXGI_ERROR_UNSUPPORTED
+	badSince    time.Time   // после первого кадра: с какого момента подряд UNSUPPORTED/NOT_FOUND
 
 	// Как создано устройство и какой путь преобразования выбран (для diag).
 	devInfo     deviceCreateResult
@@ -185,6 +186,7 @@ func New(cfg Config) (*Capturer, error) {
 	}
 	defer found.release()
 	c.adapter, c.monitor = found.info.AdapterName, found.info.Name
+	c.noteRotation(found.info.Rotation)
 	c.luid = found.info.AdapterLUID
 	c.hybrid = hybridSystem()
 	c.basic = adapterIsBasic(c.luid)
@@ -439,6 +441,7 @@ func (c *Capturer) openDup() error {
 		return err
 	}
 	defer f.release()
+	c.noteRotation(f.info.Rotation)
 	out1, err := f.output.QueryInterface(&iidOutput1)
 	if err != nil {
 		return fmt.Errorf("IDXGIOutput1: %w", err)
@@ -451,6 +454,16 @@ func (c *Capturer) openDup() error {
 	}
 	c.dup = dup
 	return nil
+}
+
+func (c *Capturer) noteRotation(rotation uint32) {
+	if rotation == c.rotation {
+		return
+	}
+	c.rotation = rotation
+	if rotation > dxgiModeRotationIdentity {
+		c.logf("Внимание: монитор %s повёрнут (DXGI Rotation=%d). Поворот изображения и курсора пока не поддерживается: изображение на телевизоре может быть повёрнуто. Выберите альбомную ориентацию экрана в параметрах Windows.", c.monitor, rotation)
+	}
 }
 
 // tryOpenDup вызывает openDup не чаще раза в dupRetryInterval и не засоряет лог.

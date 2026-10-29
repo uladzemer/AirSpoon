@@ -117,7 +117,7 @@ func TestCheckFindsNewerRelease(t *testing.T) {
 			HTMLURL: "https://github.com/uladzemer/AirSpoon/releases/tag/v0.3.0",
 			Assets: []Asset{
 				{
-					Name:               "airspoon-debug-armeabi-v7a.apk",
+					Name:               "airspoon-armeabi-v7a.apk",
 					Size:               1024,
 					BrowserDownloadURL: "https://example.com/airspoon.apk",
 				},

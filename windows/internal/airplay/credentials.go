@@ -14,7 +14,10 @@ import (
 type SavedCredentials struct {
 	PairingID       string          `json:"pairing_id"`
 	Ed25519Public   []byte          `json:"ed25519_public"`
-	Ed25519Seed     []byte          `json:"ed25519_seed"` // 32-byte seed (private key is derived from this)
+	Ed25519Seed     []byte          `json:"ed25519_seed,omitempty"` // 32-byte seed (private key is derived from this)
+	ReceiverID      string          `json:"receiver_id,omitempty"`
+	ReceiverPublic  []byte          `json:"receiver_public,omitempty"`
+	Transient       bool            `json:"transient,omitempty"`
 	PairingProtocol PairingProtocol `json:"pairing_protocol,omitempty"`
 	RestoreToken    string          `json:"restore_token,omitempty"`
 }
@@ -52,7 +55,7 @@ func (c *SavedCredentials) Ed25519Keys() (ed25519.PublicKey, ed25519.PrivateKey)
 // HasPairingCredentials reports whether the saved entry contains a usable
 // AirPlay pairing identity.
 func (c *SavedCredentials) HasPairingCredentials() bool {
-	return c != nil && c.PairingID != "" &&
+	return c != nil && !c.Transient && c.PairingID != "" &&
 		len(c.Ed25519Public) == ed25519.PublicKeySize &&
 		len(c.Ed25519Seed) == ed25519.SeedSize
 }
@@ -62,6 +65,9 @@ func (c *SavedCredentials) HasPairingCredentials() bool {
 func (c *AirPlayClient) RestorePairingCredentials(saved *SavedCredentials) error {
 	if saved == nil || !saved.HasPairingCredentials() {
 		return fmt.Errorf("saved credentials contain no usable pairing identity")
+	}
+	if len(saved.ReceiverPublic) != 0 && len(saved.ReceiverPublic) != ed25519.PublicKeySize {
+		return fmt.Errorf("saved credentials contain invalid receiver public key; pair again")
 	}
 	protocol := saved.PairingProtocol
 	if protocol == PairingProtocolUnknown {
@@ -87,6 +93,8 @@ func (c *AirPlayClient) RestorePairingCredentials(saved *SavedCredentials) error
 	c.PairKeys = &PairKeys{
 		Ed25519Public:  append(ed25519.PublicKey(nil), pub...),
 		Ed25519Private: append(ed25519.PrivateKey(nil), priv...),
+		ReceiverID:     saved.ReceiverID,
+		ReceiverPublic: append(ed25519.PublicKey(nil), saved.ReceiverPublic...),
 	}
 	return nil
 }
@@ -156,7 +164,36 @@ func (cs *CredentialStore) SavePairing(deviceID string, pairingID string, pub ed
 func (cs *CredentialStore) savePairing(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.savePairingLocked(deviceID, pairingID, pub, priv, protocol, nil)
+}
 
+// SaveClientPairing persists the receiver pin only after authenticated pairing
+// or verification. This also completes TOFU migration after a saved-key verify.
+func (cs *CredentialStore) SaveClientPairing(deviceID string, client *AirPlayClient) error {
+	if client.PairKeys == nil || !client.PairKeys.receiverVerified || client.PairingProtocol() == PairingProtocolUnknown {
+		return fmt.Errorf("cannot save an unverified receiver identity")
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	keys := client.PairKeys
+	return cs.savePairingLocked(deviceID, client.PairingID, keys.Ed25519Public, keys.Ed25519Private, client.PairingProtocol(), keys)
+}
+
+// ForgetReceiverIdentity allows an explicitly approved replacement receiver to
+// be paired again, preserving the controller identity and other device state.
+func (cs *CredentialStore) ForgetReceiverIdentity(deviceID string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	creds, err := cs.backend.Lookup(deviceID)
+	if err != nil || creds == nil {
+		return err
+	}
+	copy := *creds
+	copy.ReceiverID, copy.ReceiverPublic = "", nil
+	return cs.backend.Save(deviceID, &copy)
+}
+
+func (cs *CredentialStore) savePairingLocked(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol, keys *PairKeys) error {
 	creds, err := cs.backend.Lookup(deviceID)
 	if err != nil {
 		return err
@@ -164,11 +201,18 @@ func (cs *CredentialStore) savePairing(deviceID string, pairingID string, pub ed
 	if creds == nil {
 		creds = &SavedCredentials{}
 	}
+	copy := *creds
+	creds = &copy
 	creds.PairingID = pairingID
 	creds.Ed25519Public = append([]byte(nil), pub...)
 	creds.Ed25519Seed = append([]byte(nil), priv.Seed()...)
 	if protocol != PairingProtocolUnknown {
 		creds.PairingProtocol = protocol
+	}
+	if keys != nil {
+		creds.ReceiverID = keys.ReceiverID
+		creds.ReceiverPublic = append([]byte(nil), keys.ReceiverPublic...)
+		creds.Transient = keys.Transient
 	}
 	return cs.backend.Save(deviceID, creds)
 }
@@ -189,6 +233,8 @@ func (cs *CredentialStore) SaveRestoreToken(deviceID, restoreToken string) error
 	if creds == nil {
 		creds = &SavedCredentials{}
 	}
+	copy := *creds
+	creds = &copy
 	creds.RestoreToken = restoreToken
 	return cs.backend.Save(deviceID, creds)
 }
@@ -197,6 +243,18 @@ func (cs *CredentialStore) SaveRestoreToken(deviceID, restoreToken string) error
 type fileBackend struct {
 	path    string
 	devices map[string]*SavedCredentials
+}
+
+// Only the file backend needs an envelope; keyring backends already protect
+// their contents. Keep the runtime credentials decrypted for existing callers.
+type fileCredentials struct {
+	SavedCredentials
+	ProtectedSecrets []byte `json:"protected_secrets,omitempty"`
+}
+
+type credentialSecrets struct {
+	Seed         []byte `json:"seed,omitempty"`
+	RestoreToken string `json:"restore_token,omitempty"`
 }
 
 func newFileBackend(path string) (*fileBackend, error) {
@@ -211,9 +269,49 @@ func newFileBackend(path string) (*fileBackend, error) {
 		}
 		return nil, fmt.Errorf("read credential store: %w", err)
 	}
-	if err := json.Unmarshal(data, &fb.devices); err != nil {
-		return nil, fmt.Errorf("unmarshal credential store: %w", err)
+	var stored map[string]*fileCredentials
+	err = json.Unmarshal(data, &stored)
+	if err != nil || stored == nil {
+		return fb.recoverCorruptFile()
 	}
+	for _, entry := range stored {
+		if entry == nil {
+			return fb.recoverCorruptFile()
+		}
+	}
+	migrate := false
+	for id, entry := range stored {
+		if len(entry.ProtectedSecrets) > 0 {
+			plaintext, err := unprotectCredentialSecrets(entry.ProtectedSecrets)
+			if err != nil {
+				if protectCredentials {
+					return fb.recoverCorruptFile()
+				}
+				return nil, fmt.Errorf("decrypt credential store: %w", err)
+			}
+			var secrets credentialSecrets
+			if err := json.Unmarshal(plaintext, &secrets); err != nil {
+				return fb.recoverCorruptFile()
+			}
+			entry.Ed25519Seed, entry.RestoreToken = secrets.Seed, secrets.RestoreToken
+		} else if protectCredentials && (len(entry.Ed25519Seed) > 0 || entry.RestoreToken != "") {
+			migrate = true
+		}
+		fb.devices[id] = &entry.SavedCredentials
+	}
+	if migrate {
+		if err := fb.persist(); err != nil {
+			return nil, fmt.Errorf("protect legacy credential store: %w", err)
+		}
+	}
+	return fb, nil
+}
+
+func (fb *fileBackend) recoverCorruptFile() (*fileBackend, error) {
+	if err := os.Rename(fb.path, fb.path+".bad"); err != nil {
+		return nil, fmt.Errorf("move corrupt credential store aside: %w", err)
+	}
+	fb.devices = make(map[string]*SavedCredentials)
 	return fb, nil
 }
 
@@ -222,8 +320,17 @@ func (fb *fileBackend) Lookup(deviceID string) (*SavedCredentials, error) {
 }
 
 func (fb *fileBackend) Save(deviceID string, creds *SavedCredentials) error {
+	old, existed := fb.devices[deviceID]
 	fb.devices[deviceID] = creds
-	return fb.persist()
+	if err := fb.persist(); err != nil {
+		if existed {
+			fb.devices[deviceID] = old
+		} else {
+			delete(fb.devices, deviceID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (fb *fileBackend) persist() error {
@@ -231,12 +338,46 @@ func (fb *fileBackend) persist() error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create credential dir: %w", err)
 	}
-	data, err := json.MarshalIndent(fb.devices, "", "  ")
+	stored := make(map[string]*fileCredentials, len(fb.devices))
+	for id, creds := range fb.devices {
+		entry := &fileCredentials{SavedCredentials: *creds}
+		if protectCredentials && (len(creds.Ed25519Seed) > 0 || creds.RestoreToken != "") {
+			secrets, err := json.Marshal(credentialSecrets{Seed: creds.Ed25519Seed, RestoreToken: creds.RestoreToken})
+			if err != nil {
+				return err
+			}
+			entry.ProtectedSecrets, err = protectCredentialSecrets(secrets)
+			if err != nil {
+				return fmt.Errorf("protect credential store: %w", err)
+			}
+			entry.Ed25519Seed, entry.RestoreToken = nil, ""
+		}
+		stored[id] = entry
+	}
+	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal credential store: %w", err)
 	}
-	if err := os.WriteFile(fb.path, data, 0600); err != nil {
+	file, err := os.CreateTemp(dir, ".credentials-*")
+	if err != nil {
+		return fmt.Errorf("create temporary credential store: %w", err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if err := file.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("write credential store: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync credential store: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close credential store: %w", err)
+	}
+	if err := os.Rename(file.Name(), fb.path); err != nil {
+		return fmt.Errorf("replace credential store: %w", err)
 	}
 	return nil
 }

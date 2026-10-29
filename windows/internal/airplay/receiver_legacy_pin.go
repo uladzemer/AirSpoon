@@ -55,7 +55,7 @@ func (s *receiverLegacyPINState) handle(body []byte, pin string, random io.Reade
 	if len(body) == 0 {
 		return receiverLegacyPINFail()
 	}
-	if _, err := plist.Unmarshal(body, &request); err != nil {
+	if _, err := decodeNetworkPlist(body, &request); err != nil {
 		return receiverLegacyPINFail()
 	}
 	method, hasMethod := request["method"].(string)

@@ -28,6 +28,7 @@ type dialogSpec struct {
 	initial    string
 	okText     string
 	cancelText string
+	password   bool // скрывать ввод, сохранять пробелы
 	numeric    bool // только цифры
 	center     bool // текст в поле по центру
 	limit      int  // максимум символов
@@ -61,6 +62,32 @@ func pinSpec(wrong bool) dialogSpec {
 		s.errText = "Код не подошёл, попробуйте ещё раз"
 	}
 	return s
+}
+
+func passwordSpec(wrong bool) dialogSpec {
+	s := addressSpec("")
+	s.label = "Введите пароль телевизора"
+	s.password = true
+	if wrong {
+		s.errText = "Пароль не подошёл, попробуйте ещё раз"
+	}
+	return s
+}
+
+// valid проверяет и вставленный текст, и ввод с клавиатуры.
+func (s dialogSpec) valid(text string) bool {
+	n := len([]rune(text))
+	if n < s.minLen || n > s.limit {
+		return false
+	}
+	if s.numeric {
+		for _, r := range text {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func addressSpec(initial string) dialogSpec {
@@ -201,6 +228,9 @@ func (a *App) openDialog(spec dialogSpec, t *ticket) {
 	if spec.center {
 		editStyle |= esCenter
 	}
+	if spec.password {
+		editStyle |= 0x0020 // ES_PASSWORD
+	}
 	if spec.numeric {
 		editStyle |= esNumber
 	}
@@ -322,22 +352,16 @@ func (a *App) cancelTicket(t *ticket) {
 
 // text возвращает введённый текст (для числового поля — только цифры).
 func (d *dialog) text() string {
-	s := strings.TrimSpace(getWindowText(d.edit))
-	if d.spec.numeric {
-		var b strings.Builder
-		for _, r := range s {
-			if r >= '0' && r <= '9' {
-				b.WriteRune(r)
-			}
-		}
-		s = b.String()
+	s := getWindowText(d.edit)
+	if !d.spec.password {
+		s = strings.TrimSpace(s)
 	}
 	return s
 }
 
 func (d *dialog) updateOK() {
 	enable := uintptr(0)
-	if len([]rune(d.text())) >= d.spec.minLen {
+	if d.spec.valid(d.text()) {
 		enable = 1
 	}
 	procEnableWindow.Call(d.ok, enable)
@@ -357,7 +381,7 @@ func (d *dialog) finish(text string, ok bool) {
 
 func (d *dialog) submit() {
 	t := d.text()
-	if len([]rune(t)) < d.spec.minLen {
+	if !d.spec.valid(t) {
 		return
 	}
 	d.finish(t, true)

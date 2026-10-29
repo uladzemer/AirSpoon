@@ -100,6 +100,8 @@ func TestReceiverPairingStateSavedHAPVerify(t *testing.T) {
 		PairKeys: &PairKeys{
 			Ed25519Public:  append(ed25519.PublicKey(nil), client.PairKeys.Ed25519Public...),
 			Ed25519Private: append(ed25519.PrivateKey(nil), client.PairKeys.Ed25519Private...),
+			ReceiverID:     client.PairKeys.ReceiverID,
+			ReceiverPublic: append(ed25519.PublicKey(nil), client.PairKeys.ReceiverPublic...),
 		},
 	}
 	secondState := newReceiverPairingTestState(t, "4827", store)
@@ -349,6 +351,7 @@ func runReceiverPairingServer(
 	state *receiverPairingState,
 	setupRequests int,
 	verifyRequests int,
+	mutate ...func(rtspTestRequest, []byte) []byte,
 ) (net.Conn, <-chan error, func()) {
 	t.Helper()
 	clientConn, serverConn := net.Pipe()
@@ -380,6 +383,9 @@ func runReceiverPairingServer(
 			if err != nil {
 				done <- fmt.Errorf("handle request %d: %w", i+1, err)
 				return
+			}
+			if len(mutate) > 0 {
+				response = mutate[0](request, response)
 			}
 			if err := writeRTSPTestResponse(serverConn, 200, nil, response); err != nil {
 				done <- fmt.Errorf("write response %d: %w", i+1, err)

@@ -369,7 +369,8 @@ type AirPlayClient struct {
 	// connection. It starts unset because feature flags choose only which
 	// protocol to probe first; a receiver may advertise HAP while implementing
 	// only the original raw AirPlay exchange.
-	pairingProtocol pairingProtocol
+	pairingProtocol        pairingProtocol
+	receiverIdentityWarned bool
 
 	// Encryption state after pair-verify
 	encrypted     bool
@@ -583,7 +584,7 @@ func (c *AirPlayClient) getInfoWithTimeout(timeout time.Duration) (*ReceiverInfo
 
 	// Log the full /info response for debugging audio format support
 	var fullInfo map[string]interface{}
-	if _, err2 := plist.Unmarshal(resp, &fullInfo); err2 == nil {
+	if _, err2 := decodeNetworkPlist(resp, &fullInfo); err2 == nil {
 		dbg("[INFO] full /info response keys: %v", func() []string {
 			keys := make([]string, 0, len(fullInfo))
 			for k := range fullInfo {
@@ -599,7 +600,7 @@ func (c *AirPlayClient) getInfoWithTimeout(timeout time.Duration) (*ReceiverInfo
 	}
 
 	var info ReceiverInfo
-	if _, err := plist.Unmarshal(resp, &info); err != nil {
+	if _, err := decodeNetworkPlist(resp, &info); err != nil {
 		return nil, fmt.Errorf("decode info plist: %w", err)
 	}
 	info.Server = responseHeaders["server"]
@@ -667,7 +668,7 @@ func (c *AirPlayClient) applyReceiverInfoUpdate(update map[string]interface{}, s
 	if _, ok := update["displays"]; ok {
 		info.Displays = nil
 	}
-	if _, err := plist.Unmarshal(body, &info); err != nil {
+	if _, err := decodeNetworkPlist(body, &info); err != nil {
 		return nil, fmt.Errorf("decode receiver info update: %w", err)
 	}
 	if _, hasFeatures := update["features"]; !hasFeatures {
@@ -918,26 +919,31 @@ func (c *AirPlayClient) httpRequestWithHeaders(method, path, contentType string,
 func (c *AirPlayClient) httpRequestWithHeadersTimeout(method, path, contentType string, body []byte, timeout time.Duration, extraHeaders ...map[string]string) ([]byte, map[string]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	deadline, err := c.requestDeadline(method, timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer c.conn.SetDeadline(time.Time{})
 
 	if authHdr, ok := c.preemptiveAuthHeader(method, path); ok {
 		dbg("[HTTP] authenticating %s %s up front from the cached challenge", method, path)
 		extraHeaders = append(append([]map[string]string{}, extraHeaders...), map[string]string{"Authorization": authHdr})
 	}
 
-	respBody, respHeaders, err := c.httpRequestOnce(method, path, contentType, body, timeout, extraHeaders...)
+	respBody, respHeaders, err := c.httpRequestOnce(method, path, contentType, body, deadline, extraHeaders...)
 	var authHdr string
 	var retry bool
 	authHdr, retry, err = c.digestRetryHeader(method, path, respHeaders, err)
 	if retry {
 		dbg("[HTTP] 401 digest challenge on %s %s, retrying with credentials", method, path)
 		retry := append(append([]map[string]string{}, extraHeaders...), map[string]string{"Authorization": authHdr})
-		respBody, respHeaders, err = c.httpRequestOnce(method, path, contentType, body, timeout, retry...)
+		respBody, respHeaders, err = c.httpRequestOnce(method, path, contentType, body, deadline, retry...)
 		c.logIfAuthRejected(method, path, err)
 	}
 	return respBody, respHeaders, err
 }
 
-func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body []byte, timeout time.Duration, extraHeaders ...map[string]string) ([]byte, map[string]string, error) {
+func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body []byte, deadline time.Time, extraHeaders ...map[string]string) ([]byte, map[string]string, error) {
 	seq := c.cseq.Add(1)
 
 	var buf bytes.Buffer
@@ -970,7 +976,7 @@ func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body [
 	}
 	dbg("[HTTP] wrote %d bytes to socket, waiting for response...", len(data))
 
-	return c.readHTTPResponseWithTimeout(timeout)
+	return c.readResponseBefore(deadline)
 }
 
 // rawRequest sends a bare RTSP/1.0 request without X-Apple-Session-ID or HAP
@@ -978,6 +984,11 @@ func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body [
 func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte, extraHeaders ...map[string]string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	deadline, err := c.requestDeadline(method, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer c.conn.SetDeadline(time.Time{})
 
 	seq := c.cseq.Add(1)
 
@@ -1003,7 +1014,7 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
 		return nil, markIncompleteResponse(fmt.Errorf("write request: %w", err))
 	}
 
-	resp, _, err := c.readHTTPResponse()
+	resp, _, err := c.readResponseBefore(deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,25 +1025,30 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
 func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte, extraHeaders map[string]string) ([]byte, map[string]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	deadline, err := c.requestDeadline(method, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer c.conn.SetDeadline(time.Time{})
 
 	if authHdr, ok := c.preemptiveAuthHeader(method, uri); ok {
 		dbg("[RTSP] authenticating %s %s up front from the cached challenge", method, uri)
 		extraHeaders = withHeader(extraHeaders, "Authorization", authHdr)
 	}
 
-	respBody, respHeaders, err := c.rtspRequestOnce(method, uri, contentType, body, extraHeaders)
+	respBody, respHeaders, err := c.rtspRequestOnce(method, uri, contentType, body, extraHeaders, deadline)
 	var authHdr string
 	var retry bool
 	authHdr, retry, err = c.digestRetryHeader(method, uri, respHeaders, err)
 	if retry {
 		dbg("[RTSP] 401 digest challenge on %s %s, retrying with credentials", method, uri)
-		respBody, respHeaders, err = c.rtspRequestOnce(method, uri, contentType, body, withHeader(extraHeaders, "Authorization", authHdr))
+		respBody, respHeaders, err = c.rtspRequestOnce(method, uri, contentType, body, withHeader(extraHeaders, "Authorization", authHdr), deadline)
 		c.logIfAuthRejected(method, uri, err)
 	}
 	return respBody, respHeaders, err
 }
 
-func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []byte, extraHeaders map[string]string) ([]byte, map[string]string, error) {
+func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []byte, extraHeaders map[string]string, deadline time.Time) ([]byte, map[string]string, error) {
 	seq := c.cseq.Add(1)
 
 	var buf bytes.Buffer
@@ -1064,7 +1080,7 @@ func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []
 	}
 	dbg("[RTSP] wrote %d bytes to socket, waiting for response...", len(data))
 
-	respBody, respHeaders, err := c.readHTTPResponse()
+	respBody, respHeaders, err := c.readResponseBefore(deadline)
 	if err != nil {
 		// Return the headers even on failure: a 401 carries its
 		// WWW-Authenticate challenge there, and dropping them makes an
@@ -1074,6 +1090,31 @@ func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []
 
 	dbg("[RTSP] <- response body %d bytes", len(respBody))
 	return respBody, respHeaders, nil
+}
+
+func (c *AirPlayClient) requestDeadline(method string, timeout time.Duration) (time.Time, error) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if method == "TEARDOWN" && timeout > 2*time.Second {
+		timeout = 2 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	if c.conn == nil {
+		return deadline, markIncompleteResponse(fmt.Errorf("control connection is nil"))
+	}
+	if err := c.conn.SetDeadline(deadline); err != nil {
+		return deadline, markIncompleteResponse(fmt.Errorf("set request deadline: %w", err))
+	}
+	return deadline, nil
+}
+
+func (c *AirPlayClient) readResponseBefore(deadline time.Time) ([]byte, map[string]string, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, nil, markIncompleteResponse(context.DeadlineExceeded)
+	}
+	return c.readHTTPResponseWithTimeout(remaining)
 }
 
 func (c *AirPlayClient) readHTTPResponse() ([]byte, map[string]string, error) {

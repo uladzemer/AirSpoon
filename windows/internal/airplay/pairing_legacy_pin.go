@@ -241,7 +241,7 @@ func legacyPINData(response []byte, fields ...string) (map[string][]byte, error)
 		return nil, errors.New("empty response")
 	}
 	var decoded map[string]any
-	if _, err := plist.Unmarshal(response, &decoded); err != nil {
+	if _, err := decodeNetworkPlist(response, &decoded); err != nil {
 		return nil, fmt.Errorf("decode plist: %w", err)
 	}
 	result := make(map[string][]byte, len(fields))
@@ -374,6 +374,6 @@ func (c *AirPlayClient) PairWithLegacyPIN(ctx context.Context, pin string) error
 	if err != nil {
 		return fmt.Errorf("generate ed25519: %w", err)
 	}
-	c.PairKeys = &PairKeys{Ed25519Public: pub, Ed25519Private: priv}
+	c.installPairingKeys(pub, priv)
 	return c.performLegacyPINSetupAndVerify(ctx, pin)
 }

@@ -58,6 +58,8 @@ type Hooks struct {
 	// AskPIN просит у пользователя код с экрана телевизора; wrong — прошлый код
 	// не подошёл. Возвращает ErrPINCanceled, если пользователь отказался.
 	AskPIN func(ctx context.Context, wrong bool) (string, error)
+	// AskPassword запрашивает произвольный пароль приёмника вместо PIN.
+	AskPassword func(ctx context.Context, wrong bool) (string, error)
 	// Notice показывает короткое сообщение пользователю по ходу подготовки показа
 	// (например, «качество снижено»). Может вызываться до Streaming.
 	Notice func(text string)
@@ -602,6 +604,11 @@ func (c *Controller) run(ctx context.Context, id int, d Device) {
 			},
 			AskPIN: c.cfg.UI.AskPIN,
 			Notice: func(text string) { c.notify(ctx, NoticeInfo, text) },
+		}
+		if ui, ok := c.cfg.UI.(interface {
+			AskPassword(context.Context, bool) (string, error)
+		}); ok {
+			hooks.AskPassword = ui.AskPassword
 		}
 		c.mu.Lock()
 		audio := c.audio

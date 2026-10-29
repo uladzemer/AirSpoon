@@ -262,7 +262,21 @@ func servePINPairSetup(conn net.Conn, pin string) (pinSetupServerObservation, er
 		return observation, fmt.Errorf("M5 controller signature is invalid")
 	}
 
-	m6 := tlv8EncodeOrdered([]tlv8Item{{Tag: tlvState, Value: []byte{0x06}}})
+	receiverKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x73}, ed25519.SeedSize))
+	receiverID := []byte("test-receiver")
+	receiverPublic := receiverKey.Public().(ed25519.PublicKey)
+	accessoryX := pinSetupTestHKDF(sharedKey, []byte("Pair-Setup-Accessory-Sign-Salt"), []byte("Pair-Setup-Accessory-Sign-Info"), 32)
+	receiverSignature := ed25519.Sign(receiverKey, bytes.Join([][]byte{accessoryX, receiverID, receiverPublic}, nil))
+	identity := tlv8EncodeOrdered([]tlv8Item{
+		{Tag: tlvIdentifier, Value: receiverID},
+		{Tag: tlvPublicKey, Value: receiverPublic},
+		{Tag: tlvSignature, Value: receiverSignature},
+	})
+	copy(nonce[4:], "PS-Msg06")
+	m6 := tlv8EncodeOrdered([]tlv8Item{
+		{Tag: tlvState, Value: []byte{0x06}},
+		{Tag: tlvEncryptedData, Value: aead.Seal(nil, nonce, identity, nil)},
+	})
 	if err := writeRTSPTestResponse(conn, 200, nil, m6); err != nil {
 		return observation, fmt.Errorf("write M6: %w", err)
 	}

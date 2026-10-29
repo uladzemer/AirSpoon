@@ -382,6 +382,18 @@ func (a *App) AskPIN(ctx context.Context, wrong bool) (string, error) {
 	return text, nil
 }
 
+// AskPassword запрашивает пароль приёмника, скрывая ввод.
+func (a *App) AskPassword(ctx context.Context, wrong bool) (string, error) {
+	text, ok, err := a.ask(ctx, passwordSpec(wrong))
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", trayctl.ErrPINCanceled
+	}
+	return text, nil
+}
+
 // AskAddress показывает окно ввода адреса телевизора.
 func (a *App) AskAddress(ctx context.Context, initial string) (string, bool) {
 	text, ok, err := a.ask(ctx, addressSpec(initial))

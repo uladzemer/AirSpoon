@@ -18,9 +18,9 @@ AirSpoon (windows/) — передатчик экрана Windows на AirPlay-�
      aac_eld_stub.go, alac_compressed.go, audio_assembler.go,
      audio_available.go, audio_capture_windows.go, audio_device_format.go,
      audio_frame.go, audio_pump.go, audio_resample.go, boot_clock_other.go,
-     boot_clock_windows.go, credentials.go, credentials_keyring.go, debug.go,
+     boot_clock_windows.go, credentials_keyring.go, debug.go,
      digest.go, discovery.go, display.go, display_windows.go,
-     event_channel.go, fairplay.go, fairplay_crypto.go, fairplay_md5.go,
+     fairplay.go, fairplay_crypto.go, fairplay_md5.go,
      fairplay_message.go, fairplay_sap.go, fpsap.go, fpsap_tables.go,
      latency.go, plist_types.go, receiver_digest.go, receiver_fairplay.go,
      receiver_media.go, replay.go, stream_connection_id.go, video_codec.go
@@ -31,6 +31,16 @@ AirSpoon (windows/) — передатчик экрана Windows на AirPlay-�
      (каталог AppData, подкаталог AirSpoon, файл credentials.json).
 
    Изменены в AirSpoon:
+     Аудит 2026-10-29: pairing.go — обязательная аутентификация HAP M4/M6/V2,
+     receiver_identity.go и credentials.go — pinning ключа приёмника и TOFU;
+     credentials_windows.go — DPAPI текущего пользователя, атомарная запись
+     и восстановление после повреждения JSON. client.go, mirror.go,
+     event_channel.go, pairing_legacy_pin.go, receiver_legacy_pin.go,
+     receiver_server.go — защищённый разбор сетевых plist; client.go/mirror.go —
+     дедлайны RTSP, ограниченная остановка и отказ потока при потере feedback.
+     Добавлены и обновлены соответствующие тесты.
+     sender.go, receiver_key_windows.go — подтверждение смены ключа ТВ в трее
+     с явным сбросом pinning только выбранного приёмника и новым сопряжением.
      audio.go       — удалён захват звука через GStreamer/PulseAudio/PipeWire
                       (остались RTP-упаковка, AES, ALAC, StreamAudio).
      mirror.go      — StreamFrames принимает интерфейс VideoSource вместо

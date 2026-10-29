@@ -79,6 +79,10 @@ type ReceiverConfig struct {
 	Model            string
 	Manufacturer     string
 	DeviceID         string
+	// PairingPrivateKey and PairingID explicitly preserve a test receiver's
+	// identity across restarts. Without them each server has its own identity.
+	PairingPrivateKey ed25519.PrivateKey
+	PairingID         string
 	// DisplayWidth and DisplayHeight override the selected validation profile's
 	// advertised pixel size. They must be supplied together.
 	DisplayWidth  int
@@ -286,7 +290,7 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 		cfg.Logger = log.Default()
 	}
 
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	identity, err := newReceiverIdentity(cfg.PairingPrivateKey, cfg.PairingID)
 	if err != nil {
 		return nil, fmt.Errorf("generate receiver identity: %w", err)
 	}
@@ -307,10 +311,10 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 		cfg:         cfg,
 		profile:     profile,
 		listener:    listener,
-		publicKey:   publicKey,
-		privateKey:  privateKey,
-		identifier:  generateUUID(),
-		controllers: newReceiverControllerStore(),
+		publicKey:   identity.publicKey,
+		privateKey:  identity.privateKey,
+		identifier:  identity.identifier,
+		controllers: identity.controllers,
 		digest:      digest,
 		startedAt:   time.Now(),
 		ctx:         ctx,
@@ -323,6 +327,30 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 		server.videoDump = &syncWriter{w: cfg.VideoDump}
 	}
 	return server, nil
+}
+
+type receiverIdentity struct {
+	publicKey   ed25519.PublicKey
+	privateKey  ed25519.PrivateKey
+	identifier  string
+	controllers *receiverControllerStore
+}
+
+func newReceiverIdentity(priv ed25519.PrivateKey, identifier string) (*receiverIdentity, error) {
+	if len(priv) == 0 {
+		_, generated, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+		priv = generated
+	} else if len(priv) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid receiver Ed25519 private key length")
+	}
+	priv = append(ed25519.PrivateKey(nil), priv...)
+	if identifier == "" {
+		identifier = generateUUID()
+	}
+	return &receiverIdentity{publicKey: priv.Public().(ed25519.PublicKey), privateKey: priv, identifier: identifier, controllers: newReceiverControllerStore()}, nil
 }
 
 func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
@@ -991,7 +1019,7 @@ func (s *ReceiverServer) info(sessionPrepared bool) map[string]any {
 
 func (c *receiverConnection) handleSetup(request receiverRequest) receiverResponse {
 	var setup map[string]any
-	if _, err := plist.Unmarshal(request.body, &setup); err != nil {
+	if _, err := decodeNetworkPlist(request.body, &setup); err != nil {
 		return receiverError(400, fmt.Errorf("decode SETUP plist: %w", err))
 	}
 	streams, err := receiverSetupStreams(setup)

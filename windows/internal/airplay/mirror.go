@@ -364,7 +364,7 @@ func (c *AirPlayClient) requestSetup(uri, phase string, request map[string]inter
 		return nil, nil, receivedAt, false, !hasIncompleteResponse(err), fmt.Errorf("%s SETUP: %w", phase, err)
 	}
 	var response map[string]interface{}
-	if _, err := plist.Unmarshal(responseBody, &response); err != nil {
+	if _, err := decodeNetworkPlist(responseBody, &response); err != nil {
 		// The receiver accepted this SETUP even though its response body was not
 		// usable. The caller must still release the session it just created.
 		return nil, headers, receivedAt, true, true, fmt.Errorf("unmarshal %s SETUP response: %w", phase, err)
@@ -2216,10 +2216,16 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 	// captured frame for several seconds, but the receiver's feedback timeout is
 	// already running by then.
 	sendFeedback := func() {
+		if ctx.Err() != nil {
+			return
+		}
 		body, headers, err := s.client.rtspRequest("POST", "/feedback", "", nil, nil)
 		receivedAt := time.Now()
 		if err != nil {
 			dbg("[FEEDBACK] error: %v", err)
+			if ctx.Err() == nil && hasIncompleteResponse(err) {
+				s.failStream(fmt.Errorf("feedback control channel: %w", err))
+			}
 			return
 		}
 		if s.mediaClock != nil {
@@ -2231,7 +2237,7 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 			return
 		}
 		var fbResp map[string]interface{}
-		if _, err := plist.Unmarshal(body, &fbResp); err == nil {
+		if _, err := decodeNetworkPlist(body, &fbResp); err == nil {
 			dbg("[FEEDBACK] response: %+v", debugPlistValue("", fbResp))
 		} else {
 			dbg("[FEEDBACK] response: %d unparsed bytes", len(body))
@@ -2247,6 +2253,8 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-s.streamDone:
 			return
 		case <-ticker.C:
 			// Use bare /feedback path — UxPlay matches against exact path "/feedback",
@@ -2269,9 +2277,13 @@ func (s *MirrorSession) Close() error {
 		if s.cancel != nil {
 			s.cancel()
 		}
-		s.workers.Wait()
-
 		// Send TEARDOWN to cleanly end the RTSP session on the receiver.
+		// The watchdog also bounds waiting for a feedback request holding mu:
+		// Close interrupts its I/O so shutdown can acquire the request lock.
+		if s.client != nil {
+			watchdog := time.AfterFunc(2*time.Second, func() { _ = s.client.Close() })
+			defer watchdog.Stop()
+		}
 		if s.sessionURI != "" && s.client != nil {
 			_, _, err := s.client.rtspRequest("TEARDOWN", s.sessionURI, "", nil, nil)
 			if err != nil {
@@ -2279,6 +2291,9 @@ func (s *MirrorSession) Close() error {
 			} else {
 				dbg("[TEARDOWN] sent for %s", s.sessionURI)
 			}
+		}
+		if s.client != nil {
+			_ = s.client.Close()
 		}
 		if s.audioStream != nil {
 			s.audioStream.Close()
@@ -2292,6 +2307,7 @@ func (s *MirrorSession) Close() error {
 		if s.dataConn != nil {
 			s.closeErr = s.dataConn.Close()
 		}
+		s.workers.Wait()
 	})
 	return s.closeErr
 }

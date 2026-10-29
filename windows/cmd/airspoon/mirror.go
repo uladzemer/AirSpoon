@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"airspoon/internal/airplay"
@@ -68,6 +69,8 @@ type mirrorOptions struct {
 	// показ и возвращается вызывающему. Неверный код при заданном pinPrompt не
 	// останавливает показ: приёмник спрашивают заново.
 	pinPrompt func(ctx context.Context, wrong bool) (string, error)
+	// passwordPrompt запрашивает пароль (Digest), сохраняя пробелы в нём.
+	passwordPrompt func(ctx context.Context, wrong bool) (string, error)
 	// onStreaming вызывается, когда сопряжение и SETUP позади и пошли кадры.
 	onStreaming func()
 	// onNotice получает короткие тексты для пользователя по ходу подготовки показа
@@ -186,7 +189,9 @@ func parseEncoder(value string) (useFFmpeg bool, mode native.Mode, err error) {
 	return false, mode, err
 }
 
-func mirror(ctx context.Context, o mirrorOptions) error {
+func mirror(ctx context.Context, o mirrorOptions) (resultErr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	warnIgnoredEncoderFlags(o, log.Printf)
 	var in io.Reader = os.Stdin
 	if o.stdin != nil {
@@ -257,6 +262,11 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 	if err != nil {
 		return fmt.Errorf("GET /info: %w", err)
 	}
+	defer func() {
+		if errors.Is(resultErr, airplay.ErrReceiverIdentityChanged) {
+			resultErr = &receiverKeyMismatchError{name: info.Name, deviceID: info.DeviceID, err: resultErr}
+		}
+	}()
 	logReceiverInfo(info)
 	if o.compat == "auto" {
 		class, reason := airplay.ClassifyReceiver(info)
@@ -280,6 +290,28 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		return fmt.Errorf("хранилище ключей %s: %w", o.credFile, err)
 	}
 	pin := o.pin
+	readPassword := func(wrong bool) error {
+		if o.passwordPrompt != nil {
+			p, err := o.passwordPrompt(ctx, wrong)
+			if err != nil {
+				return fmt.Errorf("ввод пароля: %w", err)
+			}
+			pin = p
+		} else {
+			fmt.Printf("\nПриёмник %q запросил пароль. Введите: ", info.Name)
+			line, err := console.ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("чтение пароля: %w", err)
+			}
+			pin = strings.TrimRight(line, "\r\n")
+		}
+		if pin == "" {
+			return errors.New("пароль не может быть пустым")
+		}
+		client.SetPassword(pin)
+		return nil
+	}
+	var receiverPin *airplay.SavedCredentials
 	reconnect := func() error {
 		_ = client.Close()
 		client = newClient()
@@ -291,32 +323,36 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		if err != nil {
 			return fmt.Errorf("GET /info после повторного подключения: %w", err)
 		}
-		return nil
+		return client.RestoreReceiverIdentity(receiverPin)
 	}
-	saveKeys := func() {
-		if client.PairKeys == nil {
-			return
+	saveKeys := func(newPINKeys bool) error {
+		if err := saveMirrorPairing(store, info.DeviceID, client, newPINKeys); err != nil {
+			return err
 		}
-		if err := store.SavePairing(info.DeviceID, client.PairingID,
-			client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private, client.PairingProtocol()); err != nil {
-			log.Printf("предупреждение: ключи сопряжения не сохранены: %v", err)
-		} else {
-			log.Printf("ключи сопряжения сохранены в %s", o.credFile)
-		}
+		receiverPin = store.Lookup(info.DeviceID)
+		return nil
 	}
 	pairWithPIN := func(expectPIN bool) error {
 		wrong := false
+		prompt := o.pinPrompt
+		password := info.RequiredPairingCredential() == airplay.PairingCredentialPassword
+		if password {
+			prompt = o.passwordPrompt
+		}
 		for {
 			if pin == "" {
 				if err := client.StartPINDisplay(); err != nil {
 					log.Printf("предупреждение: приёмник не показал PIN: %v", err)
 				}
-				if o.pinPrompt != nil {
-					p, perr := o.pinPrompt(ctx, wrong)
+				if prompt != nil {
+					p, perr := prompt(ctx, wrong)
 					if perr != nil {
 						return fmt.Errorf("ввод PIN: %w", perr)
 					}
-					pin = strings.TrimSpace(p)
+					pin = p
+					if !password {
+						pin = strings.TrimSpace(pin)
+					}
 				} else {
 					if expectPIN {
 						fmt.Printf("\nНа экране приёмника %q должен появиться PIN.\nВведите PIN: ", info.Name)
@@ -327,7 +363,10 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 					if rerr != nil && !errors.Is(rerr, io.EOF) {
 						return fmt.Errorf("чтение PIN: %w", rerr)
 					}
-					pin = strings.TrimSpace(line)
+					pin = strings.TrimRight(line, "\r\n")
+					if !password {
+						pin = strings.TrimSpace(pin)
+					}
 				}
 				if pin == "" {
 					return errors.New("PIN не может быть пустым")
@@ -335,11 +374,10 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 			}
 			err := client.Pair(ctx, pin)
 			if err == nil {
-				saveKeys()
-				return nil
+				return saveKeys(true)
 			}
 			if errors.Is(err, airplay.ErrLegacyPINRejected) || errors.Is(err, airplay.ErrHAPPINRejected) {
-				if o.pinPrompt != nil {
+				if prompt != nil {
 					// Показ из трея: приёмник сгенерирует новый код, спрашиваем заново
 					// на чистом соединении.
 					log.Printf("приёмник не принял код: %v; спрашиваем заново", err)
@@ -370,8 +408,7 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 			err := client.PairWithLegacyPIN(ctx, pin)
 			switch {
 			case err == nil:
-				saveKeys()
-				return nil
+				return saveKeys(true)
 			case errors.Is(err, airplay.ErrLegacyPINUnsupported):
 				// Приёмник не знает /pair-setup-pin (например, режим пароля):
 				// единственный случай, когда обычное сопряжение уместно.
@@ -396,6 +433,9 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		}
 		log.Println("сопряжение без PIN (pair-setup + pair-verify)...")
 		if err := client.Pair(ctx, ""); err != nil {
+			if errors.Is(err, airplay.ErrReceiverIdentityChanged) {
+				return err
+			}
 			if info.RequiresPassword() {
 				return fmt.Errorf("сопряжение с защищённым паролем приёмником: %w", err)
 			}
@@ -405,12 +445,16 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 			}
 			return pairWithPIN(false)
 		}
-		return nil
+		return saveKeys(false)
 	}
 
 	var saved *airplay.SavedCredentials
 	if !o.forcePair {
 		saved = store.Lookup(info.DeviceID)
+		receiverPin = saved
+		if err := client.RestoreReceiverIdentity(saved); err != nil {
+			return err
+		}
 	}
 	if saved != nil && saved.HasPairingCredentials() {
 		log.Println("найдены сохранённые ключи, выполняем pair-verify...")
@@ -418,12 +462,20 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		if verr == nil {
 			verr = client.PairVerify(ctx)
 		}
+		if errors.Is(verr, airplay.ErrReceiverIdentityChanged) {
+			return verr
+		}
 		if verr != nil {
 			log.Printf("pair-verify по сохранённым ключам не удался: %v; сопрягаемся заново", verr)
 			if err := reconnect(); err != nil {
 				return err
 			}
 			if err := freshPair(); err != nil {
+				return err
+			}
+		} else {
+			// Persist a receiver pin after migrating old credentials (TOFU).
+			if err := saveKeys(false); err != nil {
 				return err
 			}
 		}
@@ -449,7 +501,17 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		if client.FpEkey != nil {
 			return nil
 		}
-		if err := client.FairPlaySetup(ctx); err != nil {
+		err := client.FairPlaySetup(ctx)
+		for attempt := 0; errors.Is(err, airplay.ErrCredentialsRequired) && attempt < 3; attempt++ {
+			if perr := readPassword(attempt > 0); perr != nil {
+				return perr
+			}
+			err = client.FairPlaySetup(ctx)
+			if o.passwordPrompt == nil {
+				break
+			}
+		}
+		if err != nil {
 			if !errors.Is(err, airplay.ErrFairPlayUnsupported) {
 				return fmt.Errorf("FairPlay: %w", err)
 			}
@@ -471,10 +533,17 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 		NoAudio:    o.noAudio,
 	}
 	var video airplay.VideoSource
+	var videoClose sync.Once
+	closeVideo := func() {
+		videoClose.Do(func() {
+			if video != nil {
+				_ = video.Close()
+			}
+		})
+	}
 	defer func() {
-		if video != nil {
-			_ = video.Close()
-		}
+		cancel()
+		closeVideo()
 	}()
 	prepare := func(p airplay.VideoProfile) (airplay.VideoPreparationResult, error) {
 		if video != nil {
@@ -580,23 +649,11 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 	}
 	session, err := client.SetupMirrorWithVideoProfilePreparation(ctx, streamCfg, prepare)
 	for attempt := 0; errors.Is(err, airplay.ErrCredentialsRequired) && attempt < 3; attempt++ {
-		if o.pinPrompt != nil {
-			p, perr := o.pinPrompt(ctx, attempt > 0)
-			if perr != nil {
-				return fmt.Errorf("ввод кода: %w", perr)
-			}
-			pin = strings.TrimSpace(p)
-		} else {
-			fmt.Printf("\nПриёмник %q запросил код/пароль. Введите: ", info.Name)
-			line, _ := console.ReadString('\n')
-			pin = strings.TrimSpace(line)
+		if perr := readPassword(attempt > 0); perr != nil {
+			return perr
 		}
-		if pin == "" {
-			return errors.New("код не может быть пустым")
-		}
-		client.SetPassword(pin)
 		session, err = client.SetupMirrorWithVideoProfilePreparation(ctx, streamCfg, prepare)
-		if o.pinPrompt == nil {
+		if o.passwordPrompt == nil {
 			break // консоль: одна попытка, как раньше
 		}
 	}
@@ -616,26 +673,25 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 	if err != nil {
 		return fmt.Errorf("SETUP зеркалирования: %w", err)
 	}
+	var sessionClose sync.Once
+	closeSession := func() { sessionClose.Do(func() { session.Close() }) }
+	defer closeSession()
 	if video == nil {
 		return errors.New("SETUP завершён, но видеоисточник не запущен")
 	}
-	defer session.Close()
 	log.Printf("сессия зеркалирования готова (порт данных: %d)", session.DataPort)
 
-	go func() {
-		<-ctx.Done()
-		_ = video.Close()
-		session.Close()
-	}()
-
+	stopAudio := func() {}
 	// 6. Звук (выключается флагом --no-audio).
 	if !o.noAudio && session.HasAudio() {
 		ac, aerr := airplay.StartAudioCaptureWithOptions(ctx, session.AudioCodec(), airplay.AudioCaptureOptions{})
 		if aerr != nil {
 			log.Printf("предупреждение: захват звука не запущен: %v (продолжаем без звука)", aerr)
 		} else {
-			defer ac.Stop()
+			audioDone := make(chan struct{})
+			stopAudio = func() { ac.Stop(); <-audioDone }
 			go func() {
+				defer close(audioDone)
 				if err := session.StreamAudio(ctx, ac, session.AudioStream()); err != nil && ctx.Err() == nil {
 					log.Printf("ошибка передачи звука: %v", err)
 					notifyAudioLost(o.onNotice)
@@ -648,6 +704,17 @@ func mirror(ctx context.Context, o mirrorOptions) error {
 	} else {
 		log.Println("звук не передаётся: приёмник не выдал аудио-порты")
 	}
+
+	// Звук должен завершиться раньше Close; ранние выходы закрывает defer.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctx.Done()
+		closeVideo()
+		stopAudio()
+		closeSession()
+	}()
+	defer func() { cancel(); <-done }()
 
 	// 7. Поток видео.
 	log.Println("передача видео началась (Ctrl+C — остановить)")

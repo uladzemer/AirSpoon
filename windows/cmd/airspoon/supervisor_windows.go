@@ -173,14 +173,34 @@ func supervise(releaseMutex func()) int {
 	var crashes []time.Time
 	restarts := 0    // перезапуски после аварий (в окружение рабочего процесса)
 	gpuRestarts := 0 // перезапуски для смены видеокарты (не больше одного)
+	updated := os.Getenv(envUpdated) != ""
+	quickCrashes := 0
 	for {
 		started := time.Now()
 		cmd := exec.Command(exe)
 		cmd.Env = append(os.Environ(), envChild+"=1", envRestarted+"="+strconv.Itoa(restarts))
+		if !updated {
+			cmd.Env = filterEnv(cmd.Env, envUpdated)
+		}
 		if gpuRestarts > 0 {
 			cmd.Env = append(cmd.Env, envGPURetry+"=1")
 		}
 		if err := cmd.Start(); err != nil {
+			// Установщик мог аварийно закрыться между двумя переименованиями,
+			// ещё до запроса exitUpdate. Наблюдатель восстанавливает путь сам.
+			if !updated && !executableOK(exe) {
+				if rerr := recoverUpdate(exe); rerr == nil {
+					appendLog("обновление прервано; восстановлен исполняемый файл")
+					continue
+				}
+			}
+			if updated {
+				if rerr := restoreUpdate(exe); rerr == nil {
+					appendLog("обновление: новый процесс не запускается (%v); восстановлена предыдущая версия", err)
+					updated = false
+					continue
+				}
+			}
 			// Процесс не удалось даже запустить: работаем в этом же процессе, без присмотра.
 			appendLog("рабочий процесс не запущен (%v); программа работает без присмотра", err)
 			return runTrayApp()
@@ -229,6 +249,20 @@ func supervise(releaseMutex func()) int {
 			return int(code)
 		}
 		now := time.Now()
+		if now.Sub(started) < updateHealthyAfter {
+			quickCrashes++
+		} else {
+			quickCrashes = 0
+		}
+		if shouldRollbackUpdate(updated, quickCrashes, now.Sub(started)) {
+			if err := restoreUpdate(exe); err == nil {
+				appendLog("обновление: %d быстрых аварий; восстановлена предыдущая версия", quickCrashes)
+				updated, quickCrashes, crashes, restarts = false, 0, nil, 0
+				continue
+			} else {
+				appendLog("обновление: откат не удался: %v", err)
+			}
+		}
 		crashes = append(recentCrashes(crashes, now), now)
 		hint := ""
 		if st, serr := os.Stat(crashLogPath()); serr == nil && st.Size() > 0 && st.ModTime().After(started) {
@@ -257,8 +291,25 @@ func startUpdated() error {
 	if ver == "" {
 		ver = "latest"
 	}
+	if err := launchUpdatedVersion(exe, ver); err != nil {
+		if rerr := restoreUpdate(exe); rerr != nil {
+			return fmt.Errorf("запуск обновления: %v; откат: %w", err, rerr)
+		}
+		appendLog("обновление не запускается (%v); восстановлена предыдущая версия", err)
+		return launchRecovered(exe)
+	}
+	return nil
+}
+
+func launchUpdatedVersion(exe, ver string) error {
 	cmd := exec.Command(exe)
-	cmd.Env = append(filterEnv(os.Environ(), envChild), envUpdated+"="+ver)
+	cmd.Env = append(filterEnv(filterEnv(os.Environ(), envChild), envUpdated), envUpdated+"="+ver)
+	return cmd.Start()
+}
+
+func launchRecovered(exe string) error {
+	cmd := exec.Command(exe)
+	cmd.Env = filterEnv(filterEnv(os.Environ(), envChild), envUpdated)
 	return cmd.Start()
 }
 

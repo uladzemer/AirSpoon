@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,12 +26,25 @@ import (
 // runTray — режим трея (запуск без аргументов): один значок у часов, меню со
 // списком телевизоров, показ экрана. Возвращает код выхода процесса.
 func runTray() int {
-	if exe, err := os.Executable(); err == nil {
-		_ = os.Remove(exe + ".old")
-	}
 	if os.Getenv(envGPUPreflight) == "1" {
 		// Короткий дочерний процесс наблюдателя: без значка и мьютекса.
 		return runGPUPreflight()
+	}
+	if os.Getenv(envChild) != "1" {
+		if exe, err := os.Executable(); err == nil {
+			target := strings.TrimSuffix(exe, ".old")
+			if err := recoverUpdate(target); err != nil {
+				appendLog("обновление: восстановление при запуске: %v", err)
+				return 1
+			}
+			if target != exe {
+				if err := launchRecovered(target); err != nil {
+					appendLog("обновление: восстановленный файл не запущен: %v", err)
+					return 1
+				}
+				return 0
+			}
+		}
 	}
 	release, first, err := traywin.AcquireSingleInstance()
 	if err != nil {
@@ -112,6 +126,7 @@ func runTrayApp() (code int) {
 	}
 
 	st := settings.Load(settings.DefaultPath())
+	var settingsMu sync.Mutex
 
 	var ctl *trayctl.Controller
 	var reportBusy atomic.Bool
@@ -123,8 +138,11 @@ func runTrayApp() (code int) {
 		Audio:        true,
 		Version:      version,
 		CheckUpdates: st.CheckUpdates,
-		SaveCheckUpdates: func(on bool) {
-			st.CheckUpdates = on
+		SaveCheckUpdates: func(_ bool) {
+			settingsMu.Lock()
+			defer settingsMu.Unlock()
+			// Более позднее действие могло уже изменить состояние контроллера.
+			st.CheckUpdates = ctl.Snapshot().CheckUpdates
 			if err := settings.Save(settings.DefaultPath(), st); err != nil {
 				log.Printf("настройки: не удалось сохранить: %v", err)
 			}
@@ -142,6 +160,9 @@ func runTrayApp() (code int) {
 		},
 	})
 	app.Attach(ctl)
+	if exe, err := os.Executable(); err == nil {
+		confirmUpdateHealth(ctx, exe)
+	}
 	ctl.Start(ctx)
 	runTestHooks(ctl)
 	switch {
@@ -232,19 +253,27 @@ func installUpdateAction(app *traywin.App, rel update.Release, busy, updating *a
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	if err := update.Download(ctx, nil, rel.Asset, exeNew); err != nil {
-		onDownloadFailed(err)
+	if err := update.DownloadRelease(ctx, nil, rel, exeNew); err != nil {
+		log.Printf("обновление отклонено: %v", err)
+		app.Notify(trayctl.NoticeError, trayctl.AppName, "Обновление отклонено: "+err.Error())
 		return
 	}
 
-	_ = os.Remove(exeOld)
+	if _, err := os.Stat(exeOld); !os.IsNotExist(err) {
+		_ = os.Remove(exeNew)
+		app.Notify(trayctl.NoticeInfo, trayctl.AppName,
+			"Предыдущее обновление ещё проверяется. Повторите установку через минуту.")
+		return
+	}
 	if err := os.Rename(exe, exeOld); err != nil {
 		_ = os.Remove(exeNew)
 		onDownloadFailed(fmt.Errorf("не удалось переименовать текущий файл: %w", err))
 		return
 	}
 	if err := os.Rename(exeNew, exe); err != nil {
-		_ = os.Rename(exeOld, exe)
+		if rerr := restoreUpdate(exe); rerr != nil {
+			log.Printf("обновление: не удалось восстановить предыдущую версию: %v", rerr)
+		}
 		_ = os.Remove(exeNew)
 		onDownloadFailed(fmt.Errorf("не удалось заменить exe: %w", err))
 		return

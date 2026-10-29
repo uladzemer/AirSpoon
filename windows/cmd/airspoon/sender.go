@@ -83,6 +83,8 @@ type mirrorStreamer struct {
 	encoder  string
 	// run подменяется в тестах.
 	run func(ctx context.Context, o mirrorOptions) error
+	// confirmReceiverKeyChange uses the tray's Yes/No dialog; tests replace it.
+	confirmReceiverKeyChange func(title, text string) bool
 	// onUnsupported вызывается, когда захват экрана не открылся из-за
 	// DXGI_ERROR_UNSUPPORTED (экран на другой видеокарте). Возвращает true, если
 	// программа сама перезапустится (показ после этого продолжится), иначе false.
@@ -90,7 +92,9 @@ type mirrorStreamer struct {
 }
 
 func newMirrorStreamer() *mirrorStreamer {
-	return &mirrorStreamer{credFile: defaultCredentialsFile(), encoder: "auto", run: wrapTestRun(mirror)}
+	s := &mirrorStreamer{credFile: defaultCredentialsFile(), encoder: "auto", run: wrapTestRun(mirror)}
+	s.confirmReceiverKeyChange = confirmReceiverKeyChange
+	return s
 }
 
 func (s *mirrorStreamer) Stream(ctx context.Context, t trayctl.Target, h trayctl.Hooks) (err error) {
@@ -110,6 +114,7 @@ func (s *mirrorStreamer) Stream(ctx context.Context, t trayctl.Target, h trayctl
 		credFile:         s.credFile,
 		encoder:          s.encoder, // размер и частота кадров — по холсту приёмника, не выше 1080p60
 		pinPrompt:        h.AskPIN,
+		passwordPrompt:   h.AskPassword,
 		onStreaming:      h.Streaming,
 		onNotice:         h.Notice,
 		// Запасной путь для поддержки: AIRSPOON_NO_GPU_CONVERT=1 включает
@@ -121,7 +126,7 @@ func (s *mirrorStreamer) Stream(ctx context.Context, t trayctl.Target, h trayctl
 	} else {
 		o.host = t.Device.Addr
 	}
-	err = s.run(ctx, o)
+	err = s.runWithReceiverKeyConfirmation(ctx, o)
 	if kind := classifyCaptureError(err); kind != nil {
 		// Причина известна и перезапуск с другой видеокартой не нужен (HDR, нет
 		// Media Foundation, захват недоступен в этом сеансе).

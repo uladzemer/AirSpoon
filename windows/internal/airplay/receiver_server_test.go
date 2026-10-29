@@ -75,7 +75,7 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			// closing the session and folding its counters into the server totals.
 			deadline := time.Now().Add(time.Second)
 			stats := server.Stats()
-			for (stats.EventConnections != test.wantEvents || stats.VideoConnections != 1 ||
+			for (stats.EventConnections != test.wantEvents || stats.VideoConnections != 1 || stats.FeedbackRequests < 1 ||
 				stats.TimingProbes < test.wantTiming || stats.TimingReplies < test.wantTiming) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 				stats = server.Stats()
@@ -106,6 +106,25 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 				t.Fatalf("active media sessions after Close = %d, want 0", activeMedia)
 			}
 		})
+	}
+}
+
+func TestReceiverServerDoesNotShareIdentityByDeviceID(t *testing.T) {
+	cfg := ReceiverConfig{ListenAddress: "127.0.0.1:0", DeviceID: "restart-identity-test"}
+	first, err := NewReceiverServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewReceiverServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if bytes.Equal(first.publicKey, second.publicKey) || first.identifier == second.identifier || first.controllers == second.controllers {
+		t.Fatal("independent receivers share long-term identity or controller store")
 	}
 }
 

@@ -8,10 +8,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"os"
 	"strconv"
@@ -39,11 +41,15 @@ var ErrHAPPINRejected = errors.New("receiver rejected the HAP PIN")
 
 // PairKeys holds the long-term and session keys from pairing.
 type PairKeys struct {
-	Ed25519Public  ed25519.PublicKey
-	Ed25519Private ed25519.PrivateKey
-	SharedSecret   []byte
-	WriteKey       []byte
-	ReadKey        []byte
+	Ed25519Public    ed25519.PublicKey
+	Ed25519Private   ed25519.PrivateKey
+	SharedSecret     []byte
+	WriteKey         []byte
+	ReadKey          []byte
+	ReceiverID       string
+	ReceiverPublic   ed25519.PublicKey
+	receiverVerified bool
+	Transient        bool
 	// MixFairPlayKey records the transformation negotiated by pair-verify.
 	// HAP always mixes its shared secret. The raw protocol requests the same
 	// transformation with X-Apple-PD unless the receiver advertises feature 27,
@@ -234,10 +240,8 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 		return fmt.Errorf("generate ed25519: %w", err)
 	}
 
-	c.PairKeys = &PairKeys{
-		Ed25519Public:  pub,
-		Ed25519Private: priv,
-	}
+	c.installPairingKeys(pub, priv)
+	c.PairKeys.Transient = true
 
 	return c.performTransientSetupAndVerify(ctx)
 }
@@ -399,10 +403,7 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 		return fmt.Errorf("generate ed25519: %w", err)
 	}
 
-	c.PairKeys = &PairKeys{
-		Ed25519Public:  pub,
-		Ed25519Private: priv,
-	}
+	c.installPairingKeys(pub, priv)
 
 	// Приёмники «старого» поколения (UxPlay на Android TV) принимают PIN не по
 	// HAP/TLV8, а через /pair-setup-pin. Пробуем этот путь первым; если у
@@ -467,7 +468,10 @@ func exchangePairSetupM1(ctx context.Context, send func() ([]byte, error)) (map[
 		if err != nil {
 			return nil, fmt.Errorf("M1: %w", err)
 		}
-		m2 := tlv8Decode(m2Bytes)
+		m2, err := decodePairingMessage(m2Bytes, 2)
+		if err != nil {
+			return nil, fmt.Errorf("pair-setup M2: %w", err)
+		}
 		errorValue := m2[tlvError]
 		if len(errorValue) == 0 {
 			return m2, nil
@@ -618,7 +622,10 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		return fmt.Errorf("M3: %w", err)
 	}
 
-	m4 := tlv8Decode(m4Bytes)
+	m4, err := decodePairingMessage(m4Bytes, 4)
+	if err != nil {
+		return fmt.Errorf("pair-setup M4: %w", err)
+	}
 	if errTLV, ok := m4[tlvError]; ok {
 		if len(errTLV) > 0 && int(errTLV[0]) == pairingErrorAuthentication {
 			// Неверный код с экрана телевизора: окно кода можно показать снова.
@@ -630,10 +637,8 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	// Verify server proof: H(A, M1, K) — A unpadded
 	m2ProofInput := bytes.Join([][]byte{clientPublic, m1Proof[:], K}, nil)
 	m2ProofExpected := sha512.Sum512(m2ProofInput)
-	if serverProof, ok := m4[tlvProof]; ok {
-		if !bytes.Equal(serverProof, m2ProofExpected[:]) {
-			return fmt.Errorf("server proof mismatch")
-		}
+	if subtle.ConstantTimeCompare(m4[tlvProof], m2ProofExpected[:]) != 1 {
+		return fmt.Errorf("M4: missing or invalid server proof")
 	}
 
 	// M5: Exchange Ed25519 keys over encrypted channel
@@ -677,10 +682,33 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		return fmt.Errorf("M5: %w", err)
 	}
 
-	m6 := tlv8Decode(m6Bytes)
+	m6, err := decodePairingMessage(m6Bytes, 6)
+	if err != nil {
+		return fmt.Errorf("pair-setup M6: %w", err)
+	}
 	if errTLV, ok := m6[tlvError]; ok {
 		return fmt.Errorf("pair-setup M6 error: %d", errTLV[0])
 	}
+	copy(nonce[4:], "PS-Msg06")
+	identityBytes, err := aead.Open(nil, nonce, m6[tlvEncryptedData], nil)
+	if err != nil {
+		return fmt.Errorf("decrypt M6 receiver identity: %w", err)
+	}
+	identity, err := decodeReceiverPairingTLV(identityBytes)
+	if err != nil {
+		return fmt.Errorf("M6 receiver identity: %w", err)
+	}
+	receiverID, receiverKey := identity[tlvIdentifier], identity[tlvPublicKey]
+	accessoryX := hkdfSHA512(K, []byte("Pair-Setup-Accessory-Sign-Salt"), []byte("Pair-Setup-Accessory-Sign-Info"), 32)
+	signed := bytes.Join([][]byte{accessoryX, receiverID, receiverKey}, nil)
+	if len(receiverID) == 0 || len(receiverKey) != ed25519.PublicKeySize ||
+		!ed25519.Verify(receiverKey, signed, identity[tlvSignature]) {
+		return fmt.Errorf("M6: receiver signature verification failed")
+	}
+	if err := c.checkReceiverIdentity(string(receiverID), receiverKey); err != nil {
+		return err
+	}
+	c.rememberReceiverIdentity(string(receiverID), receiverKey)
 
 	c.PairKeys.SharedSecret = K
 	return nil
@@ -714,7 +742,10 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 		return fmt.Errorf("V1: %w", err)
 	}
 
-	v2 := tlv8Decode(v2Bytes)
+	v2, err := decodePairingMessage(v2Bytes, 2)
+	if err != nil {
+		return fmt.Errorf("pair-verify V2: %w", err)
+	}
 	if errTLV, ok := v2[tlvError]; ok {
 		return fmt.Errorf("pair-verify V2 error: %d", errTLV[0])
 	}
@@ -723,8 +754,8 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	serverEncrypted := v2[tlvEncryptedData]
 	dbg("[PAIR-VERIFY] V2: server pubkey=%d bytes, encrypted=%d bytes", len(serverKeyData), len(serverEncrypted))
 
-	if len(serverKeyData) < 32 {
-		return fmt.Errorf("V2: server public key too short")
+	if len(serverKeyData) != 32 {
+		return fmt.Errorf("V2: invalid server public key length")
 	}
 
 	// Extract server's X25519 public key
@@ -740,17 +771,41 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	// Derive session encryption key
 	verifyKey := hkdfSHA512(shared, []byte("Pair-Verify-Encrypt-Salt"), []byte("Pair-Verify-Encrypt-Info"), 32)
 
-	// Decrypt and verify server's response if encrypted data present
-	if len(serverEncrypted) > 0 {
+	// HAP requires the receiver's encrypted identity and signature. UxPlay
+	// has no HAP V2; its 96-byte raw response is checked in rawPairVerify.
+	var receiverID string
+	var receiverKey ed25519.PublicKey
+	{
 		aead, err := chacha20poly1305.New(verifyKey)
 		if err != nil {
 			return fmt.Errorf("chacha20: %w", err)
 		}
 		nonce := make([]byte, 12)
 		copy(nonce[4:], "PV-Msg02")
-		_, err = aead.Open(nil, nonce, serverEncrypted, nil)
+		plaintext, err := aead.Open(nil, nonce, serverEncrypted, nil)
 		if err != nil {
 			return fmt.Errorf("decrypt V2: %w", err)
+		}
+		identity, err := decodeReceiverPairingTLV(plaintext)
+		if err != nil {
+			return fmt.Errorf("V2 receiver identity: %w", err)
+		}
+		receiverID = string(identity[tlvIdentifier])
+		receiverKey, err = c.receiverVerificationKey(receiverID)
+		if err != nil {
+			return err
+		}
+		signed := bytes.Join([][]byte{serverPublic[:], []byte(receiverID), clientPublic[:]}, nil)
+		if len(receiverKey) == 0 {
+			if !c.receiverIdentityWarned {
+				log.Println("предупреждение: ключ приёмника отсутствует в /info; подпись V2 не проверена, pinning не выполняется")
+				c.receiverIdentityWarned = true
+			}
+		} else if receiverID == "" || !ed25519.Verify(receiverKey, signed, identity[tlvSignature]) {
+			if len(c.PairKeys.ReceiverPublic) > 0 {
+				return fmt.Errorf("V2: receiver signature verification failed: %w", ErrReceiverIdentityChanged)
+			}
+			return fmt.Errorf("V2: receiver signature verification failed")
 		}
 	}
 
@@ -786,13 +841,19 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	}
 	// Check V4 response for TLV errors
 	if len(v4Bytes) > 0 {
-		v4 := tlv8Decode(v4Bytes)
+		v4, err := decodePairingMessage(v4Bytes, 4)
+		if err != nil {
+			return fmt.Errorf("pair-verify V4: %w", err)
+		}
 		if errTLV, ok := v4[tlvError]; ok {
 			return fmt.Errorf("pair-verify V4 error: %d", errTLV[0])
 		}
 		dbg("[PAIR-VERIFY] V4: response %d bytes, no error", len(v4Bytes))
 	} else {
 		dbg("[PAIR-VERIFY] V4: empty response (OK)")
+	}
+	if len(receiverKey) > 0 {
+		c.rememberReceiverIdentity(receiverID, receiverKey)
 	}
 
 	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
@@ -864,18 +925,24 @@ func tlv8Encode(items map[byte][]byte) []byte {
 }
 
 func tlv8Decode(data []byte) map[byte][]byte {
-	result := make(map[byte][]byte)
-	for len(data) >= 2 {
-		tag := data[0]
-		length := int(data[1])
-		data = data[2:]
-		if length > len(data) {
-			break
-		}
-		result[tag] = append(result[tag], data[:length]...)
-		data = data[length:]
-	}
+	result, _ := decodeReceiverPairingTLV(data)
 	return result
+}
+
+// decodePairingMessage rejects truncation and malformed error fields before
+// callers inspect errorValue[0]. A present zero-length error is not success.
+func decodePairingMessage(data []byte, state byte) (map[byte][]byte, error) {
+	result, err := decodeReceiverPairingTLV(data)
+	if err != nil {
+		return nil, err
+	}
+	if value, ok := result[tlvError]; ok && len(value) != 1 {
+		return nil, fmt.Errorf("invalid TLV error length %d", len(value))
+	}
+	if value, ok := result[tlvState]; ok && !bytes.Equal(value, []byte{state}) {
+		return nil, fmt.Errorf("invalid TLV state, expected %d", state)
+	}
+	return result, nil
 }
 
 // hkdfSHA512 derives a key using HKDF-SHA-512.
@@ -984,12 +1051,28 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	copy(serverSigMsg[:32], serverPublic[:])
 	copy(serverSigMsg[32:], clientPublic[:])
 
-	// Use the server's Ed25519 public key from /info
-	if c.info == nil || len(c.info.PK) < 32 {
-		return fmt.Errorf("server Ed25519 public key not available (call GetInfo first)")
+	// Raw AirPlay has no identifier in V2 (UxPlay pairing.c). For old
+	// credentials and first no-PIN pairing, /info supplies a TOFU candidate;
+	// subsequent connections must prove possession of the persisted LTPK.
+	receiverID := c.PairKeys.ReceiverID
+	if c.info != nil && c.info.DeviceID != "" {
+		receiverID = c.info.DeviceID
 	}
-	serverEd25519Pub := ed25519.PublicKey(c.info.PK[:32])
+	serverEd25519Pub, err := c.receiverVerificationKey(receiverID)
+	if err != nil {
+		return err
+	}
+	if len(serverEd25519Pub) == 0 {
+		return fmt.Errorf("receiver Ed25519 public key not available (call GetInfo or pair again)")
+	}
+	if c.info != nil && len(c.PairKeys.ReceiverPublic) > 0 &&
+		len(c.info.PK) > 0 && !bytes.Equal(c.info.PK, serverEd25519Pub) {
+		return ErrReceiverIdentityChanged
+	}
 	if !ed25519.Verify(serverEd25519Pub, serverSigMsg, serverSig) {
+		if len(c.PairKeys.ReceiverPublic) > 0 {
+			return fmt.Errorf("server signature verification failed: %w", ErrReceiverIdentityChanged)
+		}
 		return fmt.Errorf("server signature verification failed")
 	}
 	dbg("[RAW-PV] server signature verified OK")
@@ -1028,6 +1111,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	// but do NOT enable HAP encryption on the control channel
 	c.PairKeys.SharedSecret = shared
 	c.PairKeys.MixFairPlayKey = mixFairPlayKey
+	c.rememberReceiverIdentity(receiverID, serverEd25519Pub)
 	c.pairType = pairingTypeLegacy
 	c.pairingProtocol = pairingProtocolRaw
 	return nil

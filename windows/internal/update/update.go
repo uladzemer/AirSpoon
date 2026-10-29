@@ -154,6 +154,20 @@ func Download(ctx context.Context, client *http.Client, asset Asset, dstPath str
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Minute}
 	}
+	// Проверяем также каждый редирект, включая переход на сервер хранения GitHub.
+	safeClient := *client
+	safeClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !strings.EqualFold(req.URL.Scheme, "https") {
+			return errors.New("скачивание обновления разрешено только по HTTPS")
+		}
+		if client.CheckRedirect != nil {
+			return client.CheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("слишком много перенаправлений при скачивании обновления")
+		}
+		return nil
+	}
 
 	dir := filepath.Dir(dstPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -181,7 +195,7 @@ func Download(ctx context.Context, client *http.Client, asset Asset, dstPath str
 	req.Header.Set("User-Agent", "AirSpoon-Sender")
 	req.Header.Set("Accept", "application/octet-stream")
 
-	resp, err := client.Do(req)
+	resp, err := safeClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("скачивание: %w", err)
 	}

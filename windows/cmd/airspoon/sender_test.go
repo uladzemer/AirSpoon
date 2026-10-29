@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -284,7 +286,12 @@ func TestControllerReportsUnreachableReceiverInRussian(t *testing.T) {
 // появляется на том же адресе, и программа сама восстанавливает показ.
 func TestControllerRecoversAfterRealReceiverDisconnect(t *testing.T) {
 	withFakeVideo(t)
-	cfg := airplay.ReceiverConfig{Profile: airplay.ReceiverProfileUxPlay}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := airplay.ReceiverConfig{Profile: airplay.ReceiverProfileUxPlay,
+		PairingPrivateKey: privateKey, PairingID: testReceiverDeviceID}
 	first := startTestReceiver(t, cfg)
 	addr := first.Addr().String()
 	ui := &guiUI{}
