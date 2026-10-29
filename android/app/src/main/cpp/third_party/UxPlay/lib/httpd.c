@@ -21,6 +21,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <stdint.h>
 
 #include "httpd.h"
 #include "netutils.h"
@@ -47,6 +48,7 @@ struct http_connection_s {
     int prefix_len;
     int prefix_checked;
     int pending_remove;
+    uint64_t raop_generation;
 };
 typedef struct http_connection_s http_connection_t;
 
@@ -61,6 +63,9 @@ struct httpd_s {
     /* These variables only edited mutex locked */
     int running;
     int joined;
+    uint64_t raop_generation;
+    uint64_t pending_remove_raop_generation;
+    uint64_t mirror_generation;
     thread_handle_t thread;
     mutex_handle_t run_mutex;
 
@@ -97,6 +102,11 @@ httpd_set_connection_type (httpd_t *httpd, void *user_data, connection_type_t ty
         }
         if (connection->user_data == user_data) {
             connection->type = type;
+            if (type == CONNECTION_TYPE_RAOP) {
+                MUTEX_LOCK(httpd->run_mutex);
+                connection->raop_generation = ++httpd->raop_generation;
+                MUTEX_UNLOCK(httpd->run_mutex);
+            }
             return i;
         }
     }
@@ -193,6 +203,7 @@ httpd_init(logger_t *logger, httpd_callbacks_t *callbacks, int nohold)
     /* Initial status joined */
     httpd->running = 0;
     httpd->joined = 1;
+    MUTEX_CREATE(httpd->run_mutex);
 
     return httpd;
 }
@@ -202,6 +213,7 @@ httpd_destroy(httpd_t *httpd)
 {
     if (httpd) {
         httpd_stop(httpd);
+        MUTEX_DESTROY(httpd->run_mutex);
         free(httpd->connections);
         free(httpd);
     }
@@ -210,6 +222,7 @@ httpd_destroy(httpd_t *httpd)
 static void
 httpd_remove_connection(httpd_t *httpd, http_connection_t *connection, int sock_err)
 {
+    httpd_set_mirror_connection(httpd, connection->user_data, false);
     int socket_fd = connection->socket_fd;
     if (sock_err) {
         logger_log(httpd->logger, LOGGER_ERR, "httpd: recv error %d on socket %d: %s",
@@ -361,6 +374,41 @@ httpd_remove_known_connections(httpd_t *httpd) {
 }
 
 void
+httpd_set_mirror_connection(httpd_t *httpd, void *user_data, bool active) {
+    /* httpd thread only; publish a scalar, never expose connections off-thread. */
+    for (int i = 0; i < httpd->max_connections; i++) {
+        http_connection_t *connection = &httpd->connections[i];
+        if (!connection->connected || connection->user_data != user_data) continue;
+        MUTEX_LOCK(httpd->run_mutex);
+        if (active) {
+            httpd->mirror_generation = connection->raop_generation;
+        } else if (httpd->mirror_generation == connection->raop_generation) {
+            httpd->mirror_generation = 0;
+        }
+        MUTEX_UNLOCK(httpd->run_mutex);
+        break;
+    }
+}
+
+uint64_t
+httpd_get_mirror_generation(httpd_t *httpd) {
+    MUTEX_LOCK(httpd->run_mutex);
+    uint64_t generation = httpd->running ? httpd->mirror_generation : 0;
+    MUTEX_UNLOCK(httpd->run_mutex);
+    return generation;
+}
+
+void
+httpd_request_remove_raop_connection(httpd_t *httpd, uint64_t generation) {
+    /* Called off-thread: never inspect connections or run destruction callbacks here. */
+    MUTEX_LOCK(httpd->run_mutex);
+    if (httpd->running && generation && generation == httpd->mirror_generation) {
+        httpd->pending_remove_raop_generation = generation;
+    }
+    MUTEX_UNLOCK(httpd->run_mutex);
+}
+
+void
 httpd_remove_connections_by_type(httpd_t *httpd, connection_type_t type) {
     for (int i = 0; i < httpd->max_connections; i++) {
         http_connection_t *connection = &httpd->connections[i];
@@ -387,12 +435,17 @@ httpd_thread(void *arg)
         struct timeval tv;
         int nfds = 0;
         int nfds_set = 0;
+        uint64_t remove_raop_generation;
 
         MUTEX_LOCK(httpd->run_mutex);
         if (!httpd->running) {
             MUTEX_UNLOCK(httpd->run_mutex);
             break;
         }
+        /* Revalidate on httpd: a new mirror owner makes an old request obsolete. */
+        remove_raop_generation = httpd->pending_remove_raop_generation == httpd->mirror_generation
+                              ? httpd->pending_remove_raop_generation : 0;
+        httpd->pending_remove_raop_generation = 0;
         MUTEX_UNLOCK(httpd->run_mutex);
 
         /* Set timeout value to 5ms */
@@ -419,6 +472,12 @@ httpd_thread(void *arg)
             int socket_fd;
             if (!httpd->connections[i].connected) {
                 continue;
+            }
+            /* Only httpd touches connection state, including pending_remove. */
+            /* A replacement session accepted after the request must survive. */
+            if (remove_raop_generation && httpd->connections[i].type == CONNECTION_TYPE_RAOP &&
+                httpd->connections[i].raop_generation == remove_raop_generation) {
+                httpd->connections[i].pending_remove = 1;
             }
             if (httpd->connections[i].pending_remove) {
                 httpd_remove_connection(httpd, &httpd->connections[i], 0);
@@ -697,6 +756,7 @@ httpd_start(httpd_t *httpd, unsigned short *port)
 
     /* Set values correctly and create new thread */
     httpd->running = 1;
+    httpd->pending_remove_raop_generation = 0;
     httpd->joined = 0;
     THREAD_CREATE(httpd->thread, httpd_thread, httpd);
     MUTEX_UNLOCK(httpd->run_mutex);

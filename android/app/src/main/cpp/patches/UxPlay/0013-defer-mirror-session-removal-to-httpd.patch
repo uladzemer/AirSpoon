@@ -1,0 +1,243 @@
+diff --git a/lib/httpd.c b/lib/httpd.c
+index 7ba033d..9a4ced8 100644
+--- a/lib/httpd.c
++++ b/lib/httpd.c
+@@ -21,6 +21,7 @@
+ #include <assert.h>
+ #include <stdbool.h>
+ #include <errno.h>
++#include <stdint.h>
+
+ #include "httpd.h"
+ #include "netutils.h"
+@@ -47,6 +48,7 @@ struct http_connection_s {
+     int prefix_len;
+     int prefix_checked;
+     int pending_remove;
++    uint64_t raop_generation;
+ };
+ typedef struct http_connection_s http_connection_t;
+
+@@ -61,6 +63,9 @@ struct httpd_s {
+     /* These variables only edited mutex locked */
+     int running;
+     int joined;
++    uint64_t raop_generation;
++    uint64_t pending_remove_raop_generation;
++    uint64_t mirror_generation;
+     thread_handle_t thread;
+     mutex_handle_t run_mutex;
+
+@@ -97,6 +102,11 @@ httpd_set_connection_type (httpd_t *httpd, void *user_data, connection_type_t ty
+         }
+         if (connection->user_data == user_data) {
+             connection->type = type;
++            if (type == CONNECTION_TYPE_RAOP) {
++                MUTEX_LOCK(httpd->run_mutex);
++                connection->raop_generation = ++httpd->raop_generation;
++                MUTEX_UNLOCK(httpd->run_mutex);
++            }
+             return i;
+         }
+     }
+@@ -193,6 +203,7 @@ httpd_init(logger_t *logger, httpd_callbacks_t *callbacks, int nohold)
+     /* Initial status joined */
+     httpd->running = 0;
+     httpd->joined = 1;
++    MUTEX_CREATE(httpd->run_mutex);
+
+     return httpd;
+ }
+@@ -202,6 +213,7 @@ httpd_destroy(httpd_t *httpd)
+ {
+     if (httpd) {
+         httpd_stop(httpd);
++        MUTEX_DESTROY(httpd->run_mutex);
+         free(httpd->connections);
+         free(httpd);
+     }
+@@ -210,6 +222,7 @@ httpd_destroy(httpd_t *httpd)
+ static void
+ httpd_remove_connection(httpd_t *httpd, http_connection_t *connection, int sock_err)
+ {
++    httpd_set_mirror_connection(httpd, connection->user_data, false);
+     int socket_fd = connection->socket_fd;
+     if (sock_err) {
+         logger_log(httpd->logger, LOGGER_ERR, "httpd: recv error %d on socket %d: %s",
+@@ -360,6 +373,41 @@ httpd_remove_known_connections(httpd_t *httpd) {
+     }
+ }
+
++void
++httpd_set_mirror_connection(httpd_t *httpd, void *user_data, bool active) {
++    /* httpd thread only; publish a scalar, never expose connections off-thread. */
++    for (int i = 0; i < httpd->max_connections; i++) {
++        http_connection_t *connection = &httpd->connections[i];
++        if (!connection->connected || connection->user_data != user_data) continue;
++        MUTEX_LOCK(httpd->run_mutex);
++        if (active) {
++            httpd->mirror_generation = connection->raop_generation;
++        } else if (httpd->mirror_generation == connection->raop_generation) {
++            httpd->mirror_generation = 0;
++        }
++        MUTEX_UNLOCK(httpd->run_mutex);
++        break;
++    }
++}
++
++uint64_t
++httpd_get_mirror_generation(httpd_t *httpd) {
++    MUTEX_LOCK(httpd->run_mutex);
++    uint64_t generation = httpd->running ? httpd->mirror_generation : 0;
++    MUTEX_UNLOCK(httpd->run_mutex);
++    return generation;
++}
++
++void
++httpd_request_remove_raop_connection(httpd_t *httpd, uint64_t generation) {
++    /* Called off-thread: never inspect connections or run destruction callbacks here. */
++    MUTEX_LOCK(httpd->run_mutex);
++    if (httpd->running && generation && generation == httpd->mirror_generation) {
++        httpd->pending_remove_raop_generation = generation;
++    }
++    MUTEX_UNLOCK(httpd->run_mutex);
++}
++
+ void
+ httpd_remove_connections_by_type(httpd_t *httpd, connection_type_t type) {
+     for (int i = 0; i < httpd->max_connections; i++) {
+@@ -387,12 +435,17 @@ httpd_thread(void *arg)
+         struct timeval tv;
+         int nfds = 0;
+         int nfds_set = 0;
++        uint64_t remove_raop_generation;
+
+         MUTEX_LOCK(httpd->run_mutex);
+         if (!httpd->running) {
+             MUTEX_UNLOCK(httpd->run_mutex);
+             break;
+         }
++        /* Revalidate on httpd: a new mirror owner makes an old request obsolete. */
++        remove_raop_generation = httpd->pending_remove_raop_generation == httpd->mirror_generation
++                              ? httpd->pending_remove_raop_generation : 0;
++        httpd->pending_remove_raop_generation = 0;
+         MUTEX_UNLOCK(httpd->run_mutex);
+
+         /* Set timeout value to 5ms */
+@@ -420,6 +473,12 @@ httpd_thread(void *arg)
+             if (!httpd->connections[i].connected) {
+                 continue;
+             }
++            /* Only httpd touches connection state, including pending_remove. */
++            /* A replacement session accepted after the request must survive. */
++            if (remove_raop_generation && httpd->connections[i].type == CONNECTION_TYPE_RAOP &&
++                httpd->connections[i].raop_generation == remove_raop_generation) {
++                httpd->connections[i].pending_remove = 1;
++            }
+             if (httpd->connections[i].pending_remove) {
+                 httpd_remove_connection(httpd, &httpd->connections[i], 0);
+                 continue;
+@@ -697,6 +756,7 @@ httpd_start(httpd_t *httpd, unsigned short *port)
+
+     /* Set values correctly and create new thread */
+     httpd->running = 1;
++    httpd->pending_remove_raop_generation = 0;
+     httpd->joined = 0;
+     THREAD_CREATE(httpd->thread, httpd_thread, httpd);
+     MUTEX_UNLOCK(httpd->run_mutex);
+diff --git a/lib/httpd.h b/lib/httpd.h
+index 72cc137..b24cd6b 100644
+--- a/lib/httpd.h
++++ b/lib/httpd.h
+@@ -15,6 +15,8 @@
+ #ifndef HTTPD_H
+ #define HTTPD_H
+
++#include <stdint.h>
++
+ #include "logger.h"
+ #include "http_request.h"
+ #include "http_response.h"
+@@ -40,6 +42,11 @@ typedef struct httpd_callbacks_s httpd_callbacks_t;
+ bool httpd_nohold(httpd_t *httpd);
+ void httpd_remove_known_connections(httpd_t *httpd);
+ void httpd_remove_connections_by_type(httpd_t *httpd, connection_type_t type);
++/* Thread-safe request; httpd owns marking and closing connections. */
++void httpd_request_remove_raop_connection(httpd_t *httpd, uint64_t generation);
++uint64_t httpd_get_mirror_generation(httpd_t *httpd);
++/* httpd thread only: publish/clear the owner of the mirror stream. */
++void httpd_set_mirror_connection(httpd_t *httpd, void *user_data, bool active);
+
+ int httpd_set_connection_type (httpd_t *http, void *user_data, connection_type_t type);
+ int httpd_count_connection_type (httpd_t *http, connection_type_t type);
+diff --git a/lib/raop.c b/lib/raop.c
+index 6e78f1f..b411856 100644
+--- a/lib/raop.c
++++ b/lib/raop.c
+@@ -390,6 +390,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+                 if (raop_rtp_mirror) {
+                     logger_log(raop->logger, LOGGER_DEBUG, "New AirPlay connection: stopping RAOP mirror"
+                                " service on RAOP connection %p", raop_conn);
++                    httpd_set_mirror_connection(raop->httpd, raop_conn, false);
+                     raop_rtp_mirror_stop(raop_rtp_mirror);
+                 }
+
+@@ -979,9 +980,13 @@ void raop_remove_known_connections(raop_t * raop) {
+     httpd_remove_known_connections(raop->httpd);
+ }
+
+-void raop_drop_mirror_session(raop_t *raop) {
++uint64_t raop_get_mirror_generation(raop_t *raop) {
++    return httpd_get_mirror_generation(raop->httpd);
++}
++
++void raop_drop_mirror_session(raop_t *raop, uint64_t generation) {
+     /* conn_destroy stops/joins mirror RTP and closes its sockets, then httpd closes RTSP. */
+-    httpd_request_remove_raop_connection(raop->httpd);
++    httpd_request_remove_raop_connection(raop->httpd, generation);
+ }
+
+ void raop_remove_hls_connections(raop_t * raop) {
+diff --git a/lib/raop.h b/lib/raop.h
+index ac7b69c..5e70ce4 100644
+--- a/lib/raop.h
++++ b/lib/raop.h
+@@ -141,6 +141,8 @@ RAOP_API void raop_stop_httpd(raop_t *raop);
+ RAOP_API void raop_set_dnssd(raop_t *raop, dnssd_t *dnssd);
+ RAOP_API void raop_destroy(raop_t *raop);
+ RAOP_API void raop_remove_known_connections(raop_t * raop);
++RAOP_API uint64_t raop_get_mirror_generation(raop_t *raop);
++RAOP_API void raop_drop_mirror_session(raop_t *raop, uint64_t generation);
+ RAOP_API void raop_remove_hls_connections(raop_t * raop);
+ RAOP_API void raop_destroy_airplay_video(raop_t *raop, int id);
+ RAOP_API void raop_playlist_remove(raop_t *raop, void *airplay_video, float position);
+diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
+index 0572004..a55b69c 100644
+--- a/lib/raop_handlers.h
++++ b/lib/raop_handlers.h
+@@ -1064,6 +1064,9 @@ raop_handler_setup(raop_conn_t *conn,
+                         return;
+                     }
+                     raop_rtp_mirror_start(conn->raop_rtp_mirror, &dport, raop->clientFPSdata);
++                    /* Publish after mirror_video_running(true) invalidates old Kotlin recovery.
++                     * An early failure capture can safely see zero/the old generation. */
++                    httpd_set_mirror_connection(raop->httpd, conn, true);
+                     logger_log(raop->logger, LOGGER_DEBUG, "Mirroring initialized successfully");
+                 } else {
+                     logger_log(raop->logger, LOGGER_ERR, "Mirroring not initialized at SETUP, playing will fail!");
+@@ -1400,6 +1403,7 @@ raop_handler_teardown(raop_conn_t *conn,
+             }
+         }
+     } else if (teardown_110) {
++        httpd_set_mirror_connection(raop->httpd, conn, false);
+         if (raop->hls_pending) {
+             raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_RTP_TO_HLS_TEARDOWN);
+         } else {
+@@ -1416,6 +1420,7 @@ raop_handler_teardown(raop_conn_t *conn,
+             conn->raop_rtp = NULL;
+         }
+         if (conn->raop_rtp_mirror) {
++            httpd_set_mirror_connection(raop->httpd, conn, false);
+             raop_rtp_mirror_destroy(conn->raop_rtp_mirror);
+             conn->raop_rtp_mirror = NULL;
+             /*fix for iOS >= 27 (does not send teardown_110 when mirrroring is stopped) */

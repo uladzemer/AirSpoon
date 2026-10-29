@@ -201,6 +201,24 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeStop(
 }
 
 extern "C"
+JNIEXPORT jlong JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeGetMirrorGeneration(
+        JNIEnv *env, jobject thiz, jlong handle) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    return ctx && ctx->raop ? (jlong)raop_get_mirror_generation(ctx->raop) : 0;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeDropMirrorSession(
+        JNIEnv *env, jobject thiz, jlong handle, jlong generation) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx || !ctx->raop) return;
+    raop_drop_mirror_session(ctx->raop, (uint64_t)generation);
+    LOGI("Mirror session removal requested / запрошен разрыв сеанса");
+}
+
+extern "C"
 JNIEXPORT void JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeDestroy(
         JNIEnv *env, jobject thiz, jlong handle) {

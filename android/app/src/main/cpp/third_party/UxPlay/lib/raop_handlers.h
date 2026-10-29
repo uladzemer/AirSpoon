@@ -23,6 +23,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <time.h>
 #include <plist/plist.h>
 #define AUDIO_SAMPLE_RATE 44100   /* all supported AirPlay audio format use this sample rate */
 #define SECOND_IN_USECS 1000000
@@ -273,6 +274,13 @@ raop_handler_pairpinstart(raop_conn_t *conn,
     logger_log(raop->logger, LOGGER_INFO, "*** CLIENT MUST NOW ENTER PIN = \"%s\" AS AIRPLAY PASSWORD", pin);
 }
 
+static uint64_t
+pin_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 static void
 raop_handler_pairsetup_pin(raop_conn_t *conn,
                            http_request_t *request, http_response_t *response,
@@ -283,6 +291,11 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
     bool data_is_plist = false;
     bool proof_request = false;
     bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
+    /* Global backoff, owned by httpd. Reject before plist parsing or any SRP work.
+     * Locked attempts neither extend the deadline nor count as failed proofs. */
+    if (raop->use_pin && pin_monotonic_ms() < raop->pin_locked_until) {
+        goto authentication_failed;
+    }
     request_data = http_request_get_data(request, &request_datalen);
     logger_log(raop->logger, LOGGER_INFO, "client requested pair-setup-pin, datalen = %d", request_datalen);
     if (request_datalen > 0) {
@@ -389,6 +402,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
         }
         raop->pin_failures = 0;
         raop->pin_failure_delay = 0;
+        raop->pin_locked_until = 0;
         if (logger_debug) {
 	    char *str = utils_data_to_string((const unsigned char *) proof, sizeof(proof), 20);
             logger_log(raop->logger, LOGGER_DEBUG, "server SRP6a proof <M1> :\n%s", str);
@@ -474,12 +488,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
                 logger_log(raop->logger, LOGGER_ERR, "Failed to rotate PIN");
             }
         }
-#ifdef WIN32
-        Sleep(1000 * raop->pin_failure_delay);
-#else
-        unsigned int remaining = raop->pin_failure_delay;
-        while ((remaining = sleep(remaining))) {}
-#endif
+        raop->pin_locked_until = pin_monotonic_ms() + 1000 * raop->pin_failure_delay;
+        logger_log(raop->logger, LOGGER_INFO, "PIN pairing locked for %u s / временная блокировка PIN",
+                   raop->pin_failure_delay);
     }
     pairing_session_reset_pin(conn->session);
     conn->pin_verified = false;
@@ -1053,6 +1064,9 @@ raop_handler_setup(raop_conn_t *conn,
                         return;
                     }
                     raop_rtp_mirror_start(conn->raop_rtp_mirror, &dport, raop->clientFPSdata);
+                    /* Publish after mirror_video_running(true) invalidates old Kotlin recovery.
+                     * An early failure capture can safely see zero/the old generation. */
+                    httpd_set_mirror_connection(raop->httpd, conn, true);
                     logger_log(raop->logger, LOGGER_DEBUG, "Mirroring initialized successfully");
                 } else {
                     logger_log(raop->logger, LOGGER_ERR, "Mirroring not initialized at SETUP, playing will fail!");
@@ -1389,6 +1403,7 @@ raop_handler_teardown(raop_conn_t *conn,
             }
         }
     } else if (teardown_110) {
+        httpd_set_mirror_connection(raop->httpd, conn, false);
         if (raop->hls_pending) {
             raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_RTP_TO_HLS_TEARDOWN);
         } else {
@@ -1405,6 +1420,7 @@ raop_handler_teardown(raop_conn_t *conn,
             conn->raop_rtp = NULL;
         }
         if (conn->raop_rtp_mirror) {
+            httpd_set_mirror_connection(raop->httpd, conn, false);
             raop_rtp_mirror_destroy(conn->raop_rtp_mirror);
             conn->raop_rtp_mirror = NULL;
             /*fix for iOS >= 27 (does not send teardown_110 when mirrroring is stopped) */

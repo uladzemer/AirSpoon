@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -27,12 +28,32 @@ class VideoRenderer(ctx: Context) {
     private var firstFrameQueued = false
     private val videoConfig = VideoConfig()
     private val recoveryHandler = Handler(Looper.getMainLooper())
-    @Volatile private var waitingForKeyframe = false
-    private val recoveryTimeout = Runnable {
-        if (waitingForKeyframe) {
-            val message = "Video recovery timed out waiting for keyframe; sender reconnect required"
-            Log.e(TAG, message)
-            benchmarkLogCallback?.invoke(message)
+    private val recovery = VideoRecovery()
+    // own short lock: the main-thread timer must not wait while a frame is being fed under `lock`
+    private val recoveryLock = Any()
+    // Both callbacks run on main, like server stop/destroy; drop only queues native removal.
+    var getMirrorGeneration: (() -> Long)? = null
+    var dropMirrorSession: ((Long) -> Unit)? = null
+    private var recoveryVersion = 0L
+    private val recoveryTimeout = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            val drop = synchronized(recoveryLock) {
+                val generation = recovery.generationToDrop(now)
+                if (generation != 0L) {
+                    // Keep cancellation from slipping between the decision and queueing removal.
+                    dropMirrorSession?.invoke(generation)
+                    true
+                } else {
+                    recovery.nextCheckDelayMs(now)?.let { recoveryHandler.postDelayed(this, it) }
+                    false
+                }
+            }
+            if (drop) {
+                val message = "Video recovery: no keyframe after codec failure; dropping mirror session / сеанс прерван"
+                Log.e(TAG, message)
+                benchmarkLogCallback?.invoke(message)
+            }
         }
     }
 
@@ -110,15 +131,26 @@ class VideoRenderer(ctx: Context) {
         stopCodec()
     }
 
-    private fun cancelRecovery() {
+    private fun cancelRecovery() = synchronized(recoveryLock) {
+        recoveryVersion++
         recoveryHandler.removeCallbacks(recoveryTimeout)
-        waitingForKeyframe = false
+        recovery.cancel()
     }
 
-    private fun awaitKeyframe() {
-        if (waitingForKeyframe) return
-        waitingForKeyframe = true
-        recoveryHandler.postDelayed(recoveryTimeout, 5_000L)
+    private fun awaitKeyframeAfterFailure() = synchronized(recoveryLock) {
+        val now = SystemClock.elapsedRealtime()
+        val version = recoveryVersion
+        // Never wait for main while holding the frame lock: nativeStop may join this thread.
+        recoveryHandler.post {
+            synchronized(recoveryLock) capture@{
+                if (version != recoveryVersion) return@capture
+                recovery.codecFailed(now, getMirrorGeneration?.invoke() ?: 0L)
+                recoveryHandler.removeCallbacks(recoveryTimeout)
+                recovery.nextCheckDelayMs(SystemClock.elapsedRealtime())?.let {
+                    recoveryHandler.postDelayed(recoveryTimeout, it)
+                }
+            }
+        }
     }
 
     private fun _resetStats() {
@@ -162,7 +194,6 @@ class VideoRenderer(ctx: Context) {
                 // a stale reference frame decodes to corruption, so wait for a keyframe to (re)start
                 if (!keyframe) {
                     if (codec != null) stopCodec()
-                    awaitKeyframe()
                     droppedFrames++
                     return
                 }
@@ -171,11 +202,13 @@ class VideoRenderer(ctx: Context) {
 
             try {
                 if (codec == null) startCodec(isH265)
-                if (_feedToCodec(data, ntpTimeNs) && keyframe) cancelRecovery()
+                val queued = _feedToCodec(data, ntpTimeNs)
                 drainOutput()
+                if (queued && keyframe) cancelRecovery()
             } catch (e: Exception) {
                 Log.w(TAG, "Codec error, resetting", e)
                 stopCodec()
+                awaitKeyframeAfterFailure()
             }
         }
     }

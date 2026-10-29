@@ -11,10 +11,10 @@ set(UXPLAY_LIB third_party/UxPlay/lib)
 
 # ---------- OpenSSL (built from source via openssl-cmake) ----------
 set(BUILD_OPENSSL ON CACHE BOOL "" FORCE)
-# Последний патч ветки 3.4: https://openssl-library.org/source/old/3.4/
-set(OPENSSL_BUILD_VERSION "3.4.8" CACHE STRING "" FORCE)
-# https://github.com/openssl/openssl/releases/download/openssl-3.4.8/openssl-3.4.8.tar.gz.sha256
-set(OPENSSL_BUILD_HASH "9de9ce2f29e584044ae07ab93fc601637be01fdc91d109c5a655ec7419e6022b" CACHE STRING "" FORCE)
+# Поддерживаемая LTS-ветка 3.5: https://openssl-library.org/source/
+set(OPENSSL_BUILD_VERSION "3.5.9" CACHE STRING "" FORCE)
+# https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz.sha256
+set(OPENSSL_BUILD_HASH "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a" CACHE STRING "" FORCE)
 set(CROSS_ANDROID ON CACHE BOOL "" FORCE)
 string(REGEX MATCH "[0-9]+" AIRPLAY_ANDROID_API "${ANDROID_PLATFORM}")
 set(OPENSSL_PARAMS "-D__ANDROID_API__=${AIRPLAY_ANDROID_API}" CACHE STRING "" FORCE)

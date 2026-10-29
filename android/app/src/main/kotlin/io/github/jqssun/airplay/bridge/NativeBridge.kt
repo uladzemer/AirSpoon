@@ -21,6 +21,8 @@ object NativeBridge {
 
     external fun nativeStart(handle: Long, port: Int): Int
     external fun nativeStop(handle: Long)
+    external fun nativeGetMirrorGeneration(handle: Long): Long
+    external fun nativeDropMirrorSession(handle: Long, generation: Long)
     external fun nativeDestroy(handle: Long)
 
     external fun nativeSetDisplaySize(handle: Long, w: Int, h: Int, fps: Int)

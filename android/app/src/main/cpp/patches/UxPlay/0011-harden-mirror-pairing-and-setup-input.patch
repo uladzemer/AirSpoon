@@ -281,20 +281,21 @@ index cdb1374..f8e62ea 100644
  int pairing_session_handshake(pairing_session_t *session, const unsigned char ecdh_key[X25519_KEY_SIZE],
                                const unsigned char ed_key[ED25519_KEY_SIZE]);
 diff --git a/lib/raop.c b/lib/raop.c
-index b0ff5b5..256c0a8 100644
+index b0ff5b5..6e78f1f 100644
 --- a/lib/raop.c
 +++ b/lib/raop.c
-@@ -77,6 +77,9 @@ struct raop_s {
+@@ -77,6 +77,10 @@ struct raop_s {
       /* for temporary storage of pin during pair-pin start */
      unsigned short pin;
      bool use_pin;
 +    unsigned int pin_generation;
 +    unsigned int pin_failures;
 +    unsigned int pin_failure_delay;
++    uint64_t pin_locked_until;
    
       /* public key as string */
      char pk_str[2*ED25519_KEY_SIZE + 1];
-@@ -119,6 +122,9 @@ struct raop_conn_s {
+@@ -119,6 +123,9 @@ struct raop_conn_s {
  
      char *client_session_id;
      bool authenticated;
@@ -304,7 +305,7 @@ index b0ff5b5..256c0a8 100644
      bool have_active_remote;
  
      /* AirSpoon: приложению сообщено о соединении (conn_init callback) */
-@@ -126,6 +132,40 @@ struct raop_conn_s {
+@@ -126,6 +133,40 @@ struct raop_conn_s {
  };
  typedef struct raop_conn_s raop_conn_t;
  
@@ -345,7 +346,7 @@ index b0ff5b5..256c0a8 100644
  #include "raop_handlers.h"
  #include "http_handlers.h"
  
-@@ -291,27 +331,50 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+@@ -291,27 +332,50 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
       * (409 для настоящего подключения). Тип дадим на первом настоящем запросе. */
      bool probe_only = probe && !ble && !client_session_id;
  
@@ -413,7 +414,7 @@ index b0ff5b5..256c0a8 100644
          } else if (client_session_id) {
              logger_log(raop->logger, LOGGER_DEBUG, "New connection %p identified as Connection type AirPlay", ptr);            
              httpd_set_connection_type(raop->httpd, ptr, CONNECTION_TYPE_AIRPLAY);
-@@ -321,7 +384,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+@@ -321,7 +385,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
              memcpy(conn->client_session_id, client_session_id, strlen(client_session_id));
              /* airplay video has been requested: shut down any running RAOP udp services */
              raop_conn_t *raop_conn = (raop_conn_t *) httpd_get_connection_by_type(raop->httpd, CONNECTION_TYPE_RAOP, 1);
@@ -422,7 +423,7 @@ index b0ff5b5..256c0a8 100644
                  raop_rtp_mirror_t *raop_rtp_mirror = raop_conn->raop_rtp_mirror;
                  if (raop_rtp_mirror) {
                      logger_log(raop->logger, LOGGER_DEBUG, "New AirPlay connection: stopping RAOP mirror"
-@@ -352,11 +415,12 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+@@ -352,11 +416,12 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
          }
      }
  
@@ -436,7 +437,7 @@ index b0ff5b5..256c0a8 100644
          conn->announced = true;
          if (raop->callbacks.conn_init) {
              raop->callbacks.conn_init(raop->callbacks.cls);
-@@ -372,7 +436,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+@@ -372,7 +437,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
  	    http_response_add_header(*response, "Audio-Jack-Status", "connected; type=digital");
      }
  
@@ -445,7 +446,7 @@ index b0ff5b5..256c0a8 100644
          const char *active_remote = http_request_get_header(request, "Active-Remote");
          if (active_remote) {
              conn->have_active_remote = true;
-@@ -516,6 +580,15 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
+@@ -516,6 +581,15 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
  
      if (handler != NULL) {
          handler(conn, request, *response, &response_data, &response_datalen);
@@ -461,7 +462,7 @@ index b0ff5b5..256c0a8 100644
      } else {
          logger_log(raop->logger, LOGGER_INFO,
                     "Unhandled Client Request: %s %s %s", method, url, protocol);
-@@ -747,7 +820,9 @@ void
+@@ -747,7 +821,9 @@ void
  raop_destroy(raop_t *raop) {
      if (raop) {
          raop_destroy_airplay_video(raop, -1);
@@ -472,19 +473,59 @@ index b0ff5b5..256c0a8 100644
          pairing_destroy(raop->pairing);
          httpd_destroy(raop->httpd);
          logger_destroy(raop->logger);
+@@ -903,6 +979,11 @@ void raop_remove_known_connections(raop_t * raop) {
+     httpd_remove_known_connections(raop->httpd);
+ }
+
++void raop_drop_mirror_session(raop_t *raop) {
++    /* conn_destroy stops/joins mirror RTP and closes its sockets, then httpd closes RTSP. */
++    httpd_request_remove_raop_connection(raop->httpd);
++}
++
+ void raop_remove_hls_connections(raop_t * raop) {
+     raop->video_play_conn = NULL;
+     httpd_remove_connections_by_type(raop->httpd, CONNECTION_TYPE_HLS);
 diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
-index b3f3b17..cd883fd 100644
+index b3f3b17..0572004 100644
 --- a/lib/raop_handlers.h
 +++ b/lib/raop_handlers.h
-@@ -281,6 +281,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -23,6 +23,7 @@
+ #include <ctype.h>
+ #include <stdlib.h>
+ #include <inttypes.h>
++#include <time.h>
+ #include <plist/plist.h>
+ #define AUDIO_SAMPLE_RATE 44100   /* all supported AirPlay audio format use this sample rate */
+ #define SECOND_IN_USECS 1000000
+@@ -273,6 +274,13 @@ raop_handler_pairpinstart(raop_conn_t *conn,
+     logger_log(raop->logger, LOGGER_INFO, "*** CLIENT MUST NOW ENTER PIN = \"%s\" AS AIRPLAY PASSWORD", pin);
+ }
+
++static uint64_t
++pin_monotonic_ms(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++}
++
+ static void
+ raop_handler_pairsetup_pin(raop_conn_t *conn,
+                            http_request_t *request, http_response_t *response,
+@@ -281,7 +289,13 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
      const char *request_data = NULL;;
      int request_datalen = 0;
      bool data_is_plist = false;
 +    bool proof_request = false;
      bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
++    /* Global backoff, owned by httpd. Reject before plist parsing or any SRP work.
++     * Locked attempts neither extend the deadline nor count as failed proofs. */
++    if (raop->use_pin && pin_monotonic_ms() < raop->pin_locked_until) {
++        goto authentication_failed;
++    }
      request_data = http_request_get_data(request, &request_datalen);
      logger_log(raop->logger, LOGGER_INFO, "client requested pair-setup-pin, datalen = %d", request_datalen);
-@@ -308,6 +309,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+     if (request_datalen > 0) {
+@@ -308,6 +322,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
      plist_t req_authtag_node = plist_dict_get_item(req_root_node, "authTag");
    
      if (PLIST_IS_STRING(req_method_node) && PLIST_IS_STRING(req_user_node)) {
@@ -493,7 +534,7 @@ index b3f3b17..cd883fd 100644
          /* this is the initial pair-setup-pin request */
          const char *salt = NULL;
          char pin[6] = { '\0' };
-@@ -316,17 +319,18 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -316,17 +332,18 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          char *method = NULL;
          char *user = NULL;
          plist_get_string_val(req_method_node, &method);
@@ -514,7 +555,7 @@ index b3f3b17..cd883fd 100644
          if (raop->pin < 10000) {
              raop->pin = 0;
          }
-@@ -350,6 +354,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -350,6 +367,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          return;
      } else if (PLIST_IS_DATA(req_pk_node) && PLIST_IS_DATA(req_proof_node)) {
          /* this is the second part of pair-setup-pin request */
@@ -522,7 +563,7 @@ index b3f3b17..cd883fd 100644
          char *client_pk = NULL;
          char *client_proof = NULL;
          unsigned char proof[64] = { '\0' };
-@@ -358,7 +363,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -358,7 +376,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          uint64_t client_proof_len = 0;
          plist_get_data_val(req_pk_node, &client_pk, &client_pk_len); 
          plist_get_data_val(req_proof_node, &client_proof, &client_proof_len);
@@ -533,16 +574,17 @@ index b3f3b17..cd883fd 100644
              logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client_proof_len %d invalid)", (int) client_proof_len);
              free (client_proof);
              free (client_pk);
-@@ -380,6 +387,8 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -380,6 +400,9 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
              logger_log(raop->logger, LOGGER_ERR, "Client Authentication Failure (client proof not validated)");
              goto authentication_failed;
          }
 +        raop->pin_failures = 0;
 +        raop->pin_failure_delay = 0;
++        raop->pin_locked_until = 0;
          if (logger_debug) {
  	    char *str = utils_data_to_string((const unsigned char *) proof, sizeof(proof), 20);
              logger_log(raop->logger, LOGGER_DEBUG, "server SRP6a proof <M1> :\n%s", str);
-@@ -404,6 +413,14 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -404,6 +427,14 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          plist_get_data_val(req_epk_node, &client_epk, &client_epk_len); 
          plist_get_data_val(req_authtag_node, &client_authtag, &client_authtag_len);
  
@@ -557,7 +599,7 @@ index b3f3b17..cd883fd 100644
          if (logger_debug) {
              char *str = utils_data_to_string((const unsigned char *) client_epk, client_epk_len, 16);
              logger_log(raop->logger, LOGGER_DEBUG, "client_epk %d:\n%s\n", (int) client_epk_len, str);
-@@ -418,7 +435,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -418,7 +449,7 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          free (client_epk);
          plist_free(req_root_node);
          ret = srp_confirm_pair_setup(conn->session, raop->pairing, epk, authtag);
@@ -566,7 +608,7 @@ index b3f3b17..cd883fd 100644
              logger_log(raop->logger, LOGGER_ERR, "pair-pin-setup (step 3): client authentication failed\n");
              goto authentication_failed;
          } else {
-@@ -435,7 +452,38 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
+@@ -435,7 +466,35 @@ raop_handler_pairsetup_pin(raop_conn_t *conn,
          http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
          return;
      }
@@ -592,12 +634,9 @@ index b3f3b17..cd883fd 100644
 +                logger_log(raop->logger, LOGGER_ERR, "Failed to rotate PIN");
 +            }
 +        }
-+#ifdef WIN32
-+        Sleep(1000 * raop->pin_failure_delay);
-+#else
-+        unsigned int remaining = raop->pin_failure_delay;
-+        while ((remaining = sleep(remaining))) {}
-+#endif
++        raop->pin_locked_until = pin_monotonic_ms() + 1000 * raop->pin_failure_delay;
++        logger_log(raop->logger, LOGGER_INFO, "PIN pairing locked for %u s / временная блокировка PIN",
++                   raop->pin_failure_delay);
 +    }
 +    pairing_session_reset_pin(conn->session);
 +    conn->pin_verified = false;
@@ -605,7 +644,7 @@ index b3f3b17..cd883fd 100644
      http_response_init(response, "RTSP/1.0", 470, "Client Authentication Failure");
  }
  
-@@ -473,10 +521,8 @@ raop_handler_pairverify(raop_conn_t *conn,
+@@ -473,10 +532,8 @@ raop_handler_pairverify(raop_conn_t *conn,
                          char **response_data, int *response_datalen)
  {
      raop_t *raop = conn->raop;
@@ -616,7 +655,7 @@ index b3f3b17..cd883fd 100644
      }
      unsigned char public_key[X25519_KEY_SIZE];
      unsigned char signature[PAIRING_SIG_SIZE];
-@@ -486,37 +532,41 @@ raop_handler_pairverify(raop_conn_t *conn,
+@@ -486,37 +543,41 @@ raop_handler_pairverify(raop_conn_t *conn,
      data = (unsigned char *) http_request_get_data(request, &datalen);
      if (datalen < 4) {
          logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
@@ -675,7 +714,7 @@ index b3f3b17..cd883fd 100644
          }
          *response_data = calloc(1, sizeof(public_key) + sizeof(signature));
          if (*response_data) {
-@@ -530,18 +580,29 @@ raop_handler_pairverify(raop_conn_t *conn,
+@@ -530,18 +591,29 @@ raop_handler_pairverify(raop_conn_t *conn,
          logger_log(raop->logger, LOGGER_DEBUG, "2nd pair-verify step: checking signature");
          if (datalen != 4 + PAIRING_SIG_SIZE) {
              logger_log(raop->logger, LOGGER_ERR, "Invalid pair-verify data");
@@ -709,7 +748,7 @@ index b3f3b17..cd883fd 100644
  }
  
  static void
-@@ -626,8 +687,19 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -626,8 +698,19 @@ raop_handler_setup(raop_conn_t *conn,
      // For the response
      plist_t res_root_node = plist_new_dict();
  
@@ -729,7 +768,7 @@ index b3f3b17..cd883fd 100644
  
          unsigned char aesiv[16] = { 0 };
          unsigned char aeskey[16] = { 0 };
-@@ -779,6 +851,10 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -779,6 +862,10 @@ raop_handler_setup(raop_conn_t *conn,
          }
  
          plist_get_data_val(req_eiv_node, &eiv, &eiv_len);
@@ -740,7 +779,7 @@ index b3f3b17..cd883fd 100644
          memcpy(aesiv, eiv, 16);
          free(eiv);	
          logger_log(raop->logger, LOGGER_DEBUG, "eiv_len = %llu", eiv_len);
-@@ -791,6 +867,10 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -791,6 +878,10 @@ raop_handler_setup(raop_conn_t *conn,
          char* ekey = NULL;
          uint64_t ekey_len = 0;
          plist_get_data_val(req_ekey_node, &ekey, &ekey_len);
@@ -751,7 +790,7 @@ index b3f3b17..cd883fd 100644
          memcpy(eaeskey,ekey,72);
          free(ekey);
          logger_log(raop->logger, LOGGER_DEBUG, "ekey_len = %llu", ekey_len);
-@@ -802,6 +882,12 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -802,6 +893,12 @@ raop_handler_setup(raop_conn_t *conn,
          }
          int ret = fairplay_decrypt(conn->fairplay, (unsigned char*) eaeskey, aeskey);
          logger_log(raop->logger, LOGGER_DEBUG, "fairplay_decrypt ret = %d", ret);
@@ -764,7 +803,7 @@ index b3f3b17..cd883fd 100644
          if (logger_debug) {
              char *str = utils_data_to_string(aeskey, 16, 16);
              logger_log(raop->logger, LOGGER_DEBUG, "16 byte aeskey (fairplay-decrypted from ekey):\n%s", str);
-@@ -959,7 +1045,13 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -959,7 +1056,13 @@ raop_handler_setup(raop_conn_t *conn,
                             " key and iv): %llu", stream_connection_id);
  
                  if (conn->raop_rtp_mirror) {
@@ -779,7 +818,7 @@ index b3f3b17..cd883fd 100644
                      raop_rtp_mirror_start(conn->raop_rtp_mirror, &dport, raop->clientFPSdata);
                      logger_log(raop->logger, LOGGER_DEBUG, "Mirroring initialized successfully");
                  } else {
-@@ -1060,6 +1152,12 @@ raop_handler_setup(raop_conn_t *conn,
+@@ -1060,6 +1163,12 @@ raop_handler_setup(raop_conn_t *conn,
      plist_free(res_root_node);
      plist_free(req_root_node);
      http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");

@@ -141,6 +141,8 @@ RAOP_API void raop_stop_httpd(raop_t *raop);
 RAOP_API void raop_set_dnssd(raop_t *raop, dnssd_t *dnssd);
 RAOP_API void raop_destroy(raop_t *raop);
 RAOP_API void raop_remove_known_connections(raop_t * raop);
+RAOP_API uint64_t raop_get_mirror_generation(raop_t *raop);
+RAOP_API void raop_drop_mirror_session(raop_t *raop, uint64_t generation);
 RAOP_API void raop_remove_hls_connections(raop_t * raop);
 RAOP_API void raop_destroy_airplay_video(raop_t *raop, int id);
 RAOP_API void raop_playlist_remove(raop_t *raop, void *airplay_video, float position);

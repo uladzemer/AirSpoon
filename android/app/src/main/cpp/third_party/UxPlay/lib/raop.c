@@ -80,6 +80,7 @@ struct raop_s {
     unsigned int pin_generation;
     unsigned int pin_failures;
     unsigned int pin_failure_delay;
+    uint64_t pin_locked_until;
   
      /* public key as string */
     char pk_str[2*ED25519_KEY_SIZE + 1];
@@ -389,6 +390,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
                 if (raop_rtp_mirror) {
                     logger_log(raop->logger, LOGGER_DEBUG, "New AirPlay connection: stopping RAOP mirror"
                                " service on RAOP connection %p", raop_conn);
+                    httpd_set_mirror_connection(raop->httpd, raop_conn, false);
                     raop_rtp_mirror_stop(raop_rtp_mirror);
                 }
 
@@ -976,6 +978,15 @@ raop_stop_httpd(raop_t *raop) {
 
 void raop_remove_known_connections(raop_t * raop) {
     httpd_remove_known_connections(raop->httpd);
+}
+
+uint64_t raop_get_mirror_generation(raop_t *raop) {
+    return httpd_get_mirror_generation(raop->httpd);
+}
+
+void raop_drop_mirror_session(raop_t *raop, uint64_t generation) {
+    /* conn_destroy stops/joins mirror RTP and closes its sockets, then httpd closes RTSP. */
+    httpd_request_remove_raop_connection(raop->httpd, generation);
 }
 
 void raop_remove_hls_connections(raop_t * raop) {

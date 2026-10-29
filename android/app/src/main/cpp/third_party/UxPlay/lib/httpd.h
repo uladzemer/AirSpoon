@@ -15,6 +15,8 @@
 #ifndef HTTPD_H
 #define HTTPD_H
 
+#include <stdint.h>
+
 #include "logger.h"
 #include "http_request.h"
 #include "http_response.h"
@@ -40,6 +42,11 @@ typedef struct httpd_callbacks_s httpd_callbacks_t;
 bool httpd_nohold(httpd_t *httpd);
 void httpd_remove_known_connections(httpd_t *httpd);
 void httpd_remove_connections_by_type(httpd_t *httpd, connection_type_t type);
+/* Thread-safe request; httpd owns marking and closing connections. */
+void httpd_request_remove_raop_connection(httpd_t *httpd, uint64_t generation);
+uint64_t httpd_get_mirror_generation(httpd_t *httpd);
+/* httpd thread only: publish/clear the owner of the mirror stream. */
+void httpd_set_mirror_connection(httpd_t *httpd, void *user_data, bool active);
 
 int httpd_set_connection_type (httpd_t *http, void *user_data, connection_type_t type);
 int httpd_count_connection_type (httpd_t *http, connection_type_t type);

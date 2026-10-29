@@ -248,6 +248,16 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onCreate() {
         super.onCreate()
+        videoRenderer.getMirrorGeneration = {
+            // Both callbacks run on main, serialized with nativeStop/nativeDestroy.
+            if (nativeHandle != 0L) NativeBridge.nativeGetMirrorGeneration(nativeHandle) else 0L
+        }
+        videoRenderer.dropMirrorSession = { generation ->
+            // Main looper serializes this with nativeStop/nativeDestroy and handle replacement.
+            if (nativeHandle != 0L && generation != 0L) {
+                NativeBridge.nativeDropMirrorSession(nativeHandle, generation)
+            }
+        }
         UpdateManager.setSessionActive { isBusyForUpdate }
         lifecycleScope.launch {
             while (isActive) {
