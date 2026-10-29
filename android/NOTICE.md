@@ -23,13 +23,22 @@ AirSpoon для Android TV (каталог `android/`) — форк проект
 |---|---|---|---|
 | `UxPlay` | https://github.com/FDH2/UxPlay | `df67c212a433cf6dda3676dd40c097900d24e645` | GPL v3 (`UxPlay/LICENSE`); внутри — llhttp (MIT), playfair и др. со своими лицензиями |
 | `libplist` | https://github.com/libimobiledevice/libplist | `f41b1ea67045e0c09339974d83e389972d84f166` | LGPL v2.1 (`libplist/COPYING.LESSER`) |
-| `openssl-cmake` | https://github.com/viaduck/openssl-cmake | `4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8` (ветка `v3`) | MIT (`openssl-cmake/LICENSE`); сам OpenSSL 3.x (Apache License 2.0) скачивается при сборке |
+| `openssl-cmake` | https://github.com/viaduck/openssl-cmake | `4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8` (ветка `v3`) | MIT (`openssl-cmake/LICENSE`); сам OpenSSL 3.5.9 LTS (Apache License 2.0) скачивается при сборке |
 | `ffmpeg` | https://github.com/FFmpeg/FFmpeg | `38b88335f99e76ed89ff3c93f877fdefce736c13` | LGPL v2.1 и новее (`ffmpeg/LICENSE.md`); собирается без `--enable-gpl`, только декодеры ALAC и AAC |
 
 Текст Apache-2.0 для OpenSSL: [`licenses/OpenSSL-Apache-2.0.txt`](licenses/OpenSSL-Apache-2.0.txt),
 официальный источник: https://www.apache.org/licenses/LICENSE-2.0.txt.
-Архив исходников OpenSSL также содержит `LICENSE.txt`, распаковываемый CMake при сборке;
-в APK он автоматически не включается. Лицензии обеих платформ публикуются в `AirSpoon-LICENSES.zip`.
+Архив исходников OpenSSL также содержит `LICENSE.txt`, распаковываемый CMake при сборке.
+Тексты лицензий из репозитория включены в APK как `assets/licenses/` и доступны в настройках
+«О программе и лицензии» вместе с версией приложения и ссылкой на исходный код
+https://github.com/uladzemer/AirSpoon. Лицензии обеих платформ также публикуются в `AirSpoon-LICENSES.zip`.
+
+Экран перечисляет AirSpoon / android-airplay-server (GPL-3.0), UxPlay (GPL-3.0+),
+ShairPlay и libplist / libcnary (LGPL-2.1+), playfair (GPL-3.0), llhttp, csrp, jsmn,
+time64 и openssl-cmake (MIT), FFmpeg с декодерами ALAC/AAC (LGPL-2.1+),
+OpenSSL, Oboe, AndroidX / Compose / Material / Media3, Dagger / Hilt,
+Kotlin / kotlinx.coroutines (Apache-2.0). Уведомления MIT для csrp, jsmn и time64
+скопированы из заголовков включённых исходников; остальные тексты — из файлов лицензий.
 
 ### FairPlay (`UxPlay/lib/playfair/`)
 
@@ -44,6 +53,12 @@ playfair обратной разработкой; как именно — не �
 проекта (`.github/workflows/apk.yml`) не копировались.
 
 ## Изменения относительно исходного проекта
+
+- Экран лицензий (2026-10-29): локальные тексты, управление пультом, версия и адрес исходников.
+  OpenSSL переведён с неподдерживаемой 3.4.8 на 3.5.9 LTS;
+  источник версии: https://openssl-library.org/source/;
+  SHA-256: `603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a`,
+  официальный файл: https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz.sha256.
 
 - Подписанный Ed25519-манифест обновлений (аудит 3.3, 2026-10-29): проверка версии, имени,
   размера и SHA-256 APK до PackageInstaller; проверка подписи через JNI и уже включённый OpenSSL.
@@ -70,7 +85,14 @@ playfair обратной разработкой; как именно — не �
   экрана, освобождение SRP-буферов; совместимость LF/CRLF condensed-плейлистов YouTube,
   повторные URI и повторная загрузка HLS, повторный запуск mirror-потока после ошибки кодека.
   Сохранение видеодекодера при пропуске кадров, атомарное отключение клиентов и диагностика LatencyProbe.
+- Доработки восстановления и PIN (2026-10-29): разрыв RAOP-сеанса через очередь httpd после
+  сбоя видеодекодера и трёх секунд без ключевого кадра (не чаще раза в 10 секунд);
+  неблокирующая PIN-блокировка 1–10 секунд вместо задержки httpd, с сохранением ротации PIN
+  после пяти ошибок и сброса счётчиков при успехе (справочные патчи `0011-…`, `0013-…`).
 - Каталог `fastlane/` (метаданные Google Play / F-Droid исходного проекта) удалён.
+- Устранение гонки восстановления видео (2026-10-29): поколение владельца mirror-потока
+  читается под run_mutex и сохраняется при сбое кодека; httpd удаляет только RAOP-соединение
+  с этим поколением, сохраняя новый сеанс (справочный патч `0013-…`).
 - Звук при показе экрана (2026-10-27): повтор ожидания входного буфера декодера, плавные переходы
   и маскировка одиночного потерянного кадра, нижний порог запаса после провалов Wi-Fi
   (`timeline_buffer.h`, `audio_decoder.h`, `audio_engine.cpp`); диагностика провалов приёма

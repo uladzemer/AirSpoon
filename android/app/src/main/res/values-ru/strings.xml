@@ -251,4 +251,9 @@
     <string name="update_error_title">Сбой обновления</string>
     <string name="update_download_failed">Не удалось скачать обновление</string>
     <string name="update_install_failed">Не удалось установить обновление</string>
+    <!-- О программе и лицензии -->
+    <string name="about_licenses">О программе и лицензии</string>
+    <string name="about_version">Версия %1$s (%2$d)</string>
+    <string name="about_source">Исходный код (GPL-3.0): https://github.com/uladzemer/AirSpoon</string>
+    <string name="about_license_hint">Выберите компонент, чтобы прочитать лицензию. Вверх и вниз — прокрутка, Назад — возврат к списку.</string>
 </resources>

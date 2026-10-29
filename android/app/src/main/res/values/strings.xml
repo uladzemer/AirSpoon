@@ -251,4 +251,9 @@
     <string name="update_error_title">Update failed</string>
     <string name="update_download_failed">Could not download the update</string>
     <string name="update_install_failed">Could not install the update</string>
+    <!-- About and bundled licenses -->
+    <string name="about_licenses">About and licenses</string>
+    <string name="about_version">Version %1$s (%2$d)</string>
+    <string name="about_source">Source code (GPL-3.0): https://github.com/uladzemer/AirSpoon</string>
+    <string name="about_license_hint">Select a component to read its license. Use Up and Down to scroll; Back returns to the list.</string>
 </resources>

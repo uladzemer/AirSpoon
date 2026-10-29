@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -13,6 +14,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -36,6 +38,10 @@ import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
+    var showLicenses by rememberSaveable { mutableStateOf(false) }
+    if (showLicenses) {
+        LicensesScreen(onDismiss = { showLicenses = false })
+    }
     val serverName by viewModel.pref(Prefs.SERVER_NAME).collectAsState()
     val h265 by viewModel.pref(Prefs.H265).collectAsState()
     val enforceSdr by viewModel.pref(Prefs.ENFORCE_SDR).collectAsState()
@@ -124,6 +130,11 @@ fun SettingsScreen(viewModel: MainViewModel) {
             description = stringResource(R.string.setting_check_updates_desc),
             checked = checkUpdates,
             onCheckedChange = { viewModel.set(Prefs.CHECK_UPDATES, it) }
+        )
+
+        ListItem(
+            modifier = Modifier.dpadFocus(RectangleShape).clickable { showLicenses = true },
+            headlineContent = { Text(stringResource(R.string.about_licenses)) }
         )
 
         SectionHeader(stringResource(R.string.section_connection))
