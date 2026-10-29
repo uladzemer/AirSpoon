@@ -27,6 +27,7 @@ import io.github.jqssun.airplay.ui.MainScreen
 import io.github.jqssun.airplay.ui.theme.AirPlayTheme
 import io.github.jqssun.airplay.update.UpdateDialogState
 import io.github.jqssun.airplay.update.UpdateInstaller
+import io.github.jqssun.airplay.update.UpdateManager
 import io.github.jqssun.airplay.viewmodel.LocalNetworkAccess
 import io.github.jqssun.airplay.viewmodel.MainViewModel
 import dagger.hilt.android.AndroidEntryPoint
@@ -165,6 +166,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        UpdateManager.onActivityStarted()
         _syncLocalNetwork()
         _refreshForeground()
         viewModel.checkForUpdates()
@@ -182,7 +184,7 @@ class MainActivity : ComponentActivity() {
     private fun _pipParams(): PictureInPictureParams {
         val aspect = if (viewModel.videoPlaybackActive.value) viewModel.videoPlaybackAspect.value
             else viewModel.videoAspect.value
-        val rational = Rational((aspect * 1000).toInt().coerceIn(1, 2390), 1000)
+        val rational = Rational(pipAspectNumerator(aspect), 1000)
         val builder = PictureInPictureParams.Builder().setAspectRatio(rational)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setAutoEnterEnabled(_shouldAutoPip())
@@ -206,6 +208,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        UpdateManager.onActivityStopped()
         // never stop mid-session
         if (!viewModel.pref(Prefs.RUN_IN_BACKGROUND).value && !isChangingConfigurations &&
             viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&

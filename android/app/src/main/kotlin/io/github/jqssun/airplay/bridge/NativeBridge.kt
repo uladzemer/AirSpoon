@@ -8,6 +8,8 @@ object NativeBridge {
         System.loadLibrary("airplay_native")
     }
 
+    external fun nativeVerifyEd25519(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean
+
     external fun nativeInit(
         callback: RaopCallbackHandler,
         hwAddr: ByteArray,

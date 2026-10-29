@@ -12,9 +12,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends unzip curl git make ninja-build ca-certificates perl python3 patch build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# Android command-line tools (версия 11076708 — «latest» на момент написания; при необходимости обновить)
+# Android command-line tools 12.0 (11076708), SHA-256 официального ZIP.
+# https://dl.google.com/android/repository/repository2-3.xml публикует для него SHA-1
+# d313adb7aedccf6cf0cfca51ec180f0059f5f8f8; архив сверен с ним перед вычислением SHA-256.
 RUN mkdir -p /opt/android-sdk/cmdline-tools \
  && curl -fsSL -o /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+ && echo '2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258  /tmp/cmdline-tools.zip' | sha256sum -c - \
  && unzip -q /tmp/cmdline-tools.zip -d /opt/android-sdk/cmdline-tools \
  && mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
  && rm /tmp/cmdline-tools.zip

@@ -7,6 +7,7 @@ import android.util.Log
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
@@ -20,17 +21,12 @@ class DacpController(ctx: Context) {
     private val nsdManager = ctx.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val exec = Executors.newSingleThreadExecutor()
 
-    @Volatile var dacpId = ""
-    @Volatile var activeRemote = ""
-    @Volatile private var host = ""
-    @Volatile private var port = 0
+    private val endpointState = DacpEndpointState()
 
-    val ready: Boolean get() = host.isNotEmpty() && activeRemote.isNotEmpty()
+    val ready: Boolean get() = endpointState.snapshot() != null
 
     fun update(dacpId: String, activeRemote: String) {
-        this.dacpId = dacpId
-        this.activeRemote = activeRemote
-        _resolve()
+        _resolve(endpointState.update(dacpId, activeRemote))
     }
 
     fun play() = _send("/ctrl-int/1/play")
@@ -44,10 +40,7 @@ class DacpController(ctx: Context) {
     fun playResume() = _send("/ctrl-int/1/playresume")
 
     fun reset() {
-        dacpId = ""
-        activeRemote = ""
-        host = ""
-        port = 0
+        endpointState.update("", "")
     }
 
     fun release() {
@@ -55,9 +48,9 @@ class DacpController(ctx: Context) {
         exec.shutdownNow()
     }
 
-    private fun _resolve() {
-        if (dacpId.isEmpty()) return
-        val serviceName = "iTunes_Ctrl_$dacpId"
+    private fun _resolve(request: DacpEndpointState.Request) {
+        if (request.id.isEmpty()) return
+        val serviceName = "iTunes_Ctrl_${request.id}"
         val info = NsdServiceInfo().apply {
             serviceType = "_dacp._tcp"
             this.serviceName = serviceName
@@ -68,9 +61,10 @@ class DacpController(ctx: Context) {
                     Log.w(TAG, "DACP resolve failed: $code")
                 }
                 override fun onServiceResolved(si: NsdServiceInfo) {
-                    host = si.host.hostAddress ?: return
-                    port = si.port
-                    Log.i(TAG, "DACP resolved: $host:$port")
+                    val host = si.host?.hostAddress ?: return
+                    if (endpointState.resolved(request, host, si.port)) {
+                        Log.i(TAG, "DACP resolved: $host:${si.port}")
+                    }
                 }
             })
         } catch (e: Exception) {
@@ -80,23 +74,28 @@ class DacpController(ctx: Context) {
 
     private fun _send(path: String): ListenableFuture<Unit> {
         val result = SettableFuture.create<Unit>()
-        if (!ready) {
+        val endpoint = endpointState.snapshot()
+        if (endpoint == null) {
             result.setException(IOException("dacp endpoint not resolved"))
             return result
         }
         try {
             exec.execute {
+                var conn: HttpURLConnection? = null
+                var response: InputStream? = null
                 try {
+                    if (!endpointState.isCurrent(endpoint)) throw IOException("dacp sender changed")
+                    val host = endpoint.host
+                    val port = endpoint.port
                     val url = "http://$host:$port$path"
-                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn = URL(url).openConnection() as HttpURLConnection
                     conn.requestMethod = "GET"
-                    conn.setRequestProperty("Active-Remote", activeRemote)
+                    conn.setRequestProperty("Active-Remote", endpoint.token)
                     conn.setRequestProperty("Host", "$host:$port")
                     conn.connectTimeout = 2000
                     conn.readTimeout = 2000
                     val code = conn.responseCode
-                    try { conn.inputStream.readBytes() } catch (_: Exception) {}
-                    conn.disconnect()
+                    response = if (code >= 400) conn.errorStream else conn.inputStream
                     if (code in 200..299) {
                         result.set(Unit)
                     } else {
@@ -106,6 +105,8 @@ class DacpController(ctx: Context) {
                 } catch (e: Exception) {
                     Log.w(TAG, "DACP send failed: $path", e)
                     result.setException(e)
+                } finally {
+                    try { response?.close() } catch (_: IOException) {} finally { conn?.disconnect() }
                 }
             }
         } catch (e: Exception) {

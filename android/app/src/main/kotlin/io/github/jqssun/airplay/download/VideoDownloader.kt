@@ -30,6 +30,8 @@ class VideoDownloader(private val context: Context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var transformer: Transformer? = null
+    private var activeFile: File? = null
+    private var generation = 0L
 
     // null = idle, -1 = unknown, else 0..100
     private val _progress = MutableStateFlow<Int?>(null)
@@ -48,48 +50,70 @@ class VideoDownloader(private val context: Context) {
 
     fun start(location: String) = mainHandler.post {
         if (transformer != null) return@post
+        val jobGeneration = ++generation
         _progress.value = -1
-        val file = File(context.cacheDir, TEMP_NAME)
-        val t = Transformer.Builder(context)
-            .addListener(object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, result: ExportResult) {
-                    _reset()
-                    thread {
-                        val path = _publish(file)
-                        file.delete()
-                        _toast(
-                            if (path != null) context.getString(R.string.download_saved, path)
-                            else context.getString(R.string.download_failed)
-                        )
+        var file: File? = null
+        try {
+            val output = File.createTempFile("video_download_", ".mp4", context.cacheDir)
+            file = output
+            check(output.delete())
+            activeFile = output
+            val t = Transformer.Builder(context)
+                .addListener(object : Transformer.Listener {
+                    override fun onCompleted(composition: Composition, result: ExportResult) {
+                        if (jobGeneration != generation) {
+                            output.delete()
+                            return
+                        }
+                        _reset()
+                        thread {
+                            val path = _publish(output)
+                            output.delete()
+                            _toast(
+                                jobGeneration,
+                                if (path != null) context.getString(R.string.download_saved, path)
+                                else context.getString(R.string.download_failed)
+                            )
+                        }
                     }
-                }
-                override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
-                    Log.w(TAG, "export failed", exception)
-                    _reset()
-                    file.delete()
-                    _toast(context.getString(R.string.download_failed))
-                }
-            })
-            .build()
-        transformer = t
-        t.start(MediaItem.fromUri(location), file.absolutePath)
-        mainHandler.postDelayed(_progressTick, PROGRESS_INTERVAL_MS)
+                    override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
+                        output.delete()
+                        if (jobGeneration != generation) return
+                        Log.w(TAG, "export failed", exception)
+                        _reset()
+                        _toast(jobGeneration, context.getString(R.string.download_failed))
+                    }
+                })
+                .build()
+            transformer = t
+            t.start(MediaItem.fromUri(location), output.absolutePath)
+            mainHandler.postDelayed(_progressTick, PROGRESS_INTERVAL_MS)
+        } catch (e: Exception) {
+            Log.w(TAG, "export start failed", e)
+            transformer?.cancel()
+            _reset()
+            file?.delete()
+            _toast(jobGeneration, context.getString(R.string.download_failed))
+        }
     }
 
     fun cancel() = mainHandler.post {
-        transformer?.cancel() ?: return@post
+        ++generation
+        val file = activeFile
+        transformer?.cancel()
         _reset()
-        File(context.cacheDir, TEMP_NAME).delete()
+        file?.delete()
     }
 
     private fun _reset() {
         mainHandler.removeCallbacks(_progressTick)
         transformer = null
+        activeFile = null
         _progress.value = null
     }
 
     private fun _publish(file: File): String? {
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val name = "AirSpoon_$stamp.mp4"
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -123,13 +147,12 @@ class VideoDownloader(private val context: Context) {
         }
     }
 
-    private fun _toast(msg: String) = mainHandler.post {
-        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+    private fun _toast(jobGeneration: Long, msg: String) = mainHandler.post {
+        if (jobGeneration == generation) Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
     }
 
     companion object {
         private const val TAG = "VideoDownloader"
-        private const val TEMP_NAME = "video_download.mp4"
         private const val PROGRESS_INTERVAL_MS = 500L
     }
 }

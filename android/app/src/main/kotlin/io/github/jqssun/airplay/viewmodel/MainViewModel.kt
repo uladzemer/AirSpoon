@@ -22,8 +22,12 @@ import io.github.jqssun.airplay.update.ReleaseInfo
 import io.github.jqssun.airplay.update.UpdateDialogState
 import io.github.jqssun.airplay.update.UpdateInstaller
 import io.github.jqssun.airplay.update.UpdateManager
+import io.github.jqssun.airplay.update.updateBusy
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -90,12 +94,14 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     val dacpPlayer: Player? get() = service?.dacpPlayer
 
     val updateDialogState: StateFlow<UpdateDialogState?> = UpdateManager.dialogState
-    val isStreamingActive: Boolean get() = _videoPlaybackActive.value || _videoSessionPending.value || _mirroringActive.value
+    val isStreamingActive: Boolean get() = service?.isBusyForUpdate ?: updateBusy(
+        _videoPlaybackActive.value, _videoSessionPending.value, _mirroringActive.value,
+        _audioOnly.value, _connectionCount.value
+    )
     private var _wasStreaming = false
 
-    // Вызывается из MainActivity.onStart: приёмник живёт неделями, поэтому проверяем
-    // при каждом возврате на экран (не чаще раза в сутки, см. UpdateManager).
-    fun checkForUpdates() = UpdateManager.checkForUpdates(getApplication(), isSessionActive = { isStreamingActive })
+    // Activity presents deferred offers; the service also checks daily.
+    fun checkForUpdates() = UpdateManager.checkForUpdates(getApplication())
 
     fun onUpdateNow(context: Context, release: ReleaseInfo) = UpdateManager.startDownload(context, release)
     fun onUpdateLater() = UpdateManager.onUserDismiss()
@@ -223,37 +229,35 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     // logs
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
-    private val _logLock = Any()
     private val _logList = mutableListOf<String>()
+    private sealed class LogCommand {
+        data class Append(val line: String) : LogCommand()
+        object Clear : LogCommand()
+        object Export : LogCommand()
+    }
+    private val logCommands = Channel<LogCommand>(1024)
     private val _dateFmt = object : ThreadLocal<SimpleDateFormat>() {
         override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
 
     init {
-        loadPersistedLogs()
+        viewModelScope.launch(Dispatchers.IO) { writeLogs() }
     }
 
     fun addLog(msg: String) {
         val line = "${_dateFmt.get()!!.format(Date())} $msg"
-        val snapshot: List<String>
-        synchronized(_logLock) {
-            _logList.add(line)
-            while (_logList.size > 9999) _logList.removeAt(0)
-            persistLogsLocked()
-            snapshot = _logList.toList()
-        }
-        _logs.value = snapshot
+        logCommands.trySend(LogCommand.Append(line))
     }
 
     fun clearLogs() {
-        synchronized(_logLock) {
-            _logList.clear()
-            runCatching { logFile.delete() }
-        }
-        _logs.value = emptyList()
+        viewModelScope.launch { logCommands.send(LogCommand.Clear) }
     }
 
     fun exportLogs() {
+        viewModelScope.launch { logCommands.send(LogCommand.Export) }
+    }
+
+    private suspend fun exportLogsOnWriter() {
         val ctx = getApplication<Application>()
         val file = File(ctx.cacheDir, "airplay_logs.txt")
         file.writeText(_logList.joinToString("\n"))
@@ -264,25 +268,55 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val chooserTitle = ctx.getString(io.github.jqssun.airplay.R.string.export_logs_chooser_title)
-        ctx.startActivity(Intent.createChooser(intent, chooserTitle).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }
-
-    private fun loadPersistedLogs() {
-        val snapshot: List<String>
-        synchronized(_logLock) {
-            val restored = runCatching {
-                if (logFile.exists()) logFile.readLines().takeLast(9999) else emptyList()
-            }.getOrDefault(emptyList())
-            _logList.clear()
-            _logList.addAll(restored)
-            snapshot = _logList.toList()
+        withContext(Dispatchers.Main) {
+            ctx.startActivity(Intent.createChooser(intent, chooserTitle).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
-        _logs.value = snapshot
     }
 
-    private fun persistLogsLocked() {
-        runCatching {
-            logFile.writeText(_logList.joinToString("\n"))
+    private suspend fun writeLogs() {
+        val archive = File(logFile.parentFile, "${logFile.name}.1")
+        val active = runCatching { if (logFile.exists()) logFile.readLines().takeLast(9999) else emptyList() }
+            .getOrDefault(emptyList())
+        val previous = runCatching { if (archive.exists()) archive.readLines().takeLast(9999) else emptyList() }
+            .getOrDefault(emptyList())
+        _logList.addAll((previous + active).takeLast(9999))
+        _logs.value = _logList.toList()
+        var diskLines = active.size
+        runCatching { logFile.writeText(active.joinToString("\n", postfix = if (active.isEmpty()) "" else "\n")) }
+        for (first in logCommands) {
+            delay(100)
+            val batch = mutableListOf(first)
+            while (batch.size < 256) batch += logCommands.tryReceive().getOrNull() ?: break
+            val append = mutableListOf<String>()
+            for (command in batch) {
+                when (command) {
+                    is LogCommand.Append -> {
+                        _logList.add(command.line)
+                        if (_logList.size > 9999) _logList.removeAt(0)
+                        append.add(command.line)
+                    }
+                    LogCommand.Clear -> {
+                        _logList.clear()
+                        append.clear()
+                        diskLines = 0
+                        runCatching { logFile.delete(); archive.delete() }
+                    }
+                    LogCommand.Export -> runCatching { exportLogsOnWriter() }
+                }
+            }
+            if (append.isNotEmpty()) runCatching {
+                if (diskLines + append.size > 9999) {
+                    archive.delete()
+                    if (!logFile.renameTo(archive)) {
+                        logFile.copyTo(archive, overwrite = true)
+                        logFile.delete()
+                    }
+                    diskLines = 0
+                }
+                logFile.appendText(append.joinToString("\n", postfix = "\n"))
+                diskLines += append.size
+            }
+            _logs.value = _logList.toList()
         }
     }
 
@@ -458,7 +492,7 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
                 _debugInfo.value = it.collectDebugInfo()
             }
 
-            val isStreaming = videoActive || it.videoSessionPending() || it.mirroringActive.value
+            val isStreaming = it.isBusyForUpdate
             if (_wasStreaming && !isStreaming) {
                 UpdateManager.onReturnToWaitingScreen()
             }

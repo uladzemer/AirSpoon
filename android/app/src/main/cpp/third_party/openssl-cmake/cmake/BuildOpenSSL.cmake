@@ -179,7 +179,8 @@ else()
 
     # add openssl target
     ExternalProject_Add(openssl
-        URL https://mirror.viaduck.org/openssl/openssl-${OPENSSL_BUILD_VERSION}.tar.gz
+        # Официальный архив: зеркало viaduck не содержит новых патчей ветки 3.4.
+        URL https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_BUILD_VERSION}/openssl-${OPENSSL_BUILD_VERSION}.tar.gz
         ${OPENSSL_CHECK_HASH}
         UPDATE_COMMAND ""
 

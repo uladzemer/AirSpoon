@@ -84,20 +84,26 @@ struct AudioEngine {
         // AirSpoon: новая сессия — сводка начинает отсчёт заново (база приращений
         // и таймер). Сами поля принадлежат decode-потоку, поэтому только флаг.
         mStatsReset.store(true, std::memory_order_release);
-        if (mOutput && !mOutputActive) {
-            mTimeline->flushAndReprime();
-            mOutputActive = mOutput->start();
-        }
+        retryOutputLocked();
         return mOutputActive;
     }
 
     void pause() {
         std::lock_guard<std::mutex> lk(mRebuildLock);
         mRunning = false;
-        if (mOutput && mOutputActive) {
-            mOutput->stop();
-            mOutputActive = false;
-        }
+        if (mOutput) mOutput->stop();
+        mOutputActive = false;
+        mOutputRetryAtNs = 0;
+        mOutputRetryDelayNs = OUTPUT_RETRY_MIN_NS;
+    }
+
+    void flush() {
+        std::lock_guard<std::mutex> decodeLock(mDecodeLock);
+        std::lock_guard<std::mutex> lk(mRebuildLock);
+        dropDecoder(); // joins the PCM producer before resetting its timing state
+        mRetryAtNs = 0;
+        if (mTimeline) mTimeline->requestFlush();
+        mStatsReset.store(true, std::memory_order_release);
     }
 
     // touches decoder: must not run concurrently with decode()
@@ -137,21 +143,38 @@ struct AudioEngine {
 
     // touches decoder: must not run concurrently with stop()
     void decode(const uint8_t *data, size_t len, int ct, int64_t ptsNs) {
+        std::lock_guard<std::mutex> decodeLock(mDecodeLock);
         if (!mTimeline) return;
         if (mPending.load(std::memory_order_relaxed)) {
             if (AudioConfig *raw = mPending.exchange(nullptr, std::memory_order_acquire)) {
                 std::unique_ptr<AudioConfig> c(raw);
                 dropDecoder();
                 std::lock_guard<std::mutex> lk(mRebuildLock);
-                if (mOutputActive) mOutput->stop();
+                mOutput->stop();
                 mOutput.reset();
                 initInternals(*c);
-                mOutputActive = mRunning ? mOutput->start() : false;
+                mOutputActive = false;
+                mOutputRetryAtNs = 0;
+                mOutputRetryDelayNs = OUTPUT_RETRY_MIN_NS;
             }
+        }
+        {
+            std::lock_guard<std::mutex> lk(mRebuildLock);
+            retryOutputLocked();
         }
 
         const int ci = ctIndex(ct);
         const CodecFormat wantConfig = ci >= 0 ? mQueued[ci].load(std::memory_order_acquire) : CodecFormat{};
+        if (mDecoder.decoder && mDecoder.decoder->faulted()) {
+            const int oldCt = mDecoder.ct;
+            const CodecFormat oldFormat = mDecoder.format;
+            dropDecoder();
+            mDecoder.ct = oldCt;
+            mDecoder.format = oldFormat;
+            mRetryAtNs = monoNs() + DECODER_RETRY_NS;
+            mTimeline->requestFlush();
+            mLog->warn("Audio codec fault; retrying in one second");
+        }
         // transient codec-service failure does not mute entire session
         const bool changed = ct != mDecoder.ct || wantConfig != mDecoder.format;
         if (changed || (!mDecoder.decoder && monoNs() >= mRetryAtNs)) {
@@ -172,6 +195,21 @@ struct AudioEngine {
     }
 
 private:
+    void retryOutputLocked() {
+        if (!mOutput) return;
+        mOutputActive = mOutput->active();
+        if (!mRunning || mOutputActive || monoNs() < mOutputRetryAtNs) return;
+        mTimeline->requestReprime();
+        mOutputActive = mOutput->start();
+        if (mOutputActive) {
+            mOutputRetryAtNs = monoNs() + OUTPUT_RETRY_MIN_NS;
+            mOutputRetryDelayNs = OUTPUT_RETRY_MIN_NS;
+        } else {
+            mOutputRetryAtNs = monoNs() + mOutputRetryDelayNs;
+            mOutputRetryDelayNs = std::min(mOutputRetryDelayNs * 2, OUTPUT_RETRY_MAX_NS);
+        }
+    }
+
     // AirSpoon: release decoder, keeping its retry counter in the cumulative total
     void dropDecoder() {
         if (mDecoder.decoder) mRetryOkBase += mDecoder.decoder->inputRetryOk();
@@ -275,10 +313,15 @@ private:
     // teardown stop() requires caller to guarantee no in-flight or future decode() calls
 
     std::mutex mRebuildLock;
+    std::mutex mDecodeLock; // serializes receive and RTSP FLUSH, never taken by Oboe
     std::shared_ptr<TimelineBuffer> mTimeline; // guarded by mRebuildLock
     std::shared_ptr<AudioOutput> mOutput;      // guarded by mRebuildLock
     bool mRunning = false;                     // requested output state, guarded by mRebuildLock
     bool mOutputActive = false;                // actual output state, guarded by mRebuildLock
+    static constexpr int64_t OUTPUT_RETRY_MIN_NS = 250'000'000LL;
+    static constexpr int64_t OUTPUT_RETRY_MAX_NS = 8'000'000'000LL;
+    int64_t mOutputRetryAtNs = 0;
+    int64_t mOutputRetryDelayNs = OUTPUT_RETRY_MIN_NS;
     float mClientGain = 1.0f;                  // last-set sender gain, guarded by mRebuildLock
 
     LatencyReporter mDecLatency{"decode", *mLog};
@@ -356,6 +399,10 @@ bool audio_engine_start(AudioEngine *engine) {
 
 void audio_engine_pause(AudioEngine *engine) {
     if (engine) engine->pause();
+}
+
+void audio_engine_flush(AudioEngine *engine) {
+    if (engine) engine->flush();
 }
 
 bool audio_engine_get_debug(AudioEngine *engine, void *dst, size_t dstLen) {

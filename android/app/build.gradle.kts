@@ -5,12 +5,6 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
-import java.util.Properties
-
-val localProps = Properties().apply {
-    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
-}
-
 // ABI для сборки. По умолчанию только armeabi-v7a (целевая Android TV-приставка).
 // Релиз со всеми ABI: ./gradlew assembleRelease -Pairspoon.abis=armeabi-v7a,arm64-v8a,x86_64
 val allAbis = (findProperty("airspoon.abis") as String? ?: "armeabi-v7a")
@@ -21,14 +15,24 @@ val (appVersionName, appVersionCode, updateCheck) = if (rawVersion != null) {
     val trimmed = rawVersion.trim()
     val match = Regex("""^(\d+)\.(\d+)\.(\d+)$""").matchEntire(trimmed)
         ?: throw GradleException("Invalid airspoon.version: '$rawVersion'. Expected format X.Y.Z")
-    val x = match.groupValues[1].toInt()
-    val y = match.groupValues[2].toInt()
-    val z = match.groupValues[3].toInt()
+    val parts = match.groupValues.drop(1).map {
+        it.toLongOrNull() ?: throw GradleException("Invalid airspoon.version: '$rawVersion'. Component exceeds Long range.")
+    }
+    val x = parts[0]
+    val y = parts[1]
+    val z = parts[2]
     if (y >= 100 || z >= 100) {
         throw GradleException("Invalid airspoon.version: '$rawVersion'. Y and Z must be < 100.")
     }
-    val code = x * 10000 + y * 100 + z
-    Triple(trimmed, code, true)
+    // Проверка до умножения исключает переполнение Long даже для огромного X.
+    if (x > 210000L) {
+        throw GradleException("Invalid airspoon.version: '$rawVersion'. versionCode must be <= 2100000000.")
+    }
+    val code = x * 10000L + y * 100L + z
+    if (code !in 1L..2100000000L) {
+        throw GradleException("Invalid airspoon.version: '$rawVersion'. versionCode must be in 1..2100000000.")
+    }
+    Triple(trimmed, code.toInt(), true)
 } else {
     Triple("0.1.0", 1, false)
 }
@@ -63,13 +67,8 @@ android {
                 keyPassword = "android"
             }
         }
-        if (localProps.containsKey("storeFile")) {
-            create("release") {
-                storeFile = file(localProps.getProperty("storeFile"))
-                storePassword = localProps.getProperty("storePassword")
-                keyAlias = localProps.getProperty("keyAlias")
-                keyPassword = localProps.getProperty("keyPassword")
-            }
+        create("release") {
+            initWith(getByName("debug"))
         }
     }
 
@@ -102,9 +101,10 @@ android {
             ndk { abiFilters += allAbis }
         }
         release {
+            isDebuggable = false
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfigs.findByName("release")?.let { signingConfig = it }
+            signingConfig = signingConfigs.getByName("release")
             ndk { abiFilters += allAbis }
         }
         // debuggable build with HWASan (arm64) + UBSan in native code

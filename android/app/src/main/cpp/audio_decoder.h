@@ -100,6 +100,7 @@ struct LatencyProbe {
     // call before feeding frame into MediaCodec
     void record(int64_t ptsUs, int64_t queueNs) {
         const uint64_t w = mWrite.load(std::memory_order_relaxed);
+        if (w - mRead.load(std::memory_order_acquire) >= CAP) return;
         mBuf[w % CAP] = {ptsUs, queueNs};
         mWrite.store(w + 1, std::memory_order_release);
     }
@@ -132,6 +133,7 @@ public:
     virtual bool decode(const uint8_t *data, size_t len, int64_t ptsNs) = 0;
     // AirSpoon: сколько раз нехватка входного буфера кодека прошла после повторов (для сводки)
     virtual uint32_t inputRetryOk() const { return 0; }
+    virtual bool faulted() const { return false; }
 };
 
 // 24-byte ALACSpecificConfig "magic cookie" (big-endian)
@@ -225,8 +227,10 @@ public:
     }
 
     uint32_t inputRetryOk() const override { return mRetryOk.load(std::memory_order_relaxed); }
+    bool faulted() const override { return mFault.load(std::memory_order_acquire); }
 
     bool decode(const uint8_t *data, size_t len, int64_t ptsNs) override {
+        if (faulted()) return false;
         const int64_t t0 = monoNs();
         const int64_t sincePrevMs = mPrevDecodeNs ? (t0 - mPrevDecodeNs) / 1'000'000LL : -1;
         mPrevDecodeNs = t0;
@@ -244,6 +248,7 @@ public:
         }
         const long long waitUs = (long long)((monoNs() - t0) / 1000);
         if (ii < 0) {
+            if (ii != AMEDIACODEC_INFO_TRY_AGAIN_LATER) mFault.store(true, std::memory_order_release);
             if (mFailStreak < 1000) mFailStreak++;
             logFail(t0, sincePrevMs, waitUs, "dequeue(ii=%d)", (int)ii);
             return false;
@@ -253,6 +258,7 @@ public:
         size_t cap = 0;
         uint8_t *in = AMediaCodec_getInputBuffer(mCodec, (size_t)ii, &cap);
         if (!in) {
+            mFault.store(true, std::memory_order_release);
             logFail(t0, sincePrevMs, waitUs, "nullbuf");
             return false;
         }
@@ -262,6 +268,7 @@ public:
         // still queue packets that are too large, but truncate them and report as error
         const media_status_t st = AMediaCodec_queueInputBuffer(mCodec, (size_t)ii, 0, n, (uint64_t)(ptsNs / 1000), 0);
         if (st != AMEDIA_OK) {
+            mFault.store(true, std::memory_order_release);
             logFail(t0, sincePrevMs, waitUs, "queue(st=%d)", (int)st);
             return false;
         }
@@ -303,7 +310,13 @@ private:
         AMediaCodecBufferInfo info;
         while (mDrainRun.load(std::memory_order_relaxed)) {
             ssize_t oi = AMediaCodec_dequeueOutputBuffer(mCodec, &info, DRAIN_TIMEOUT_US);
-            if (oi < 0) continue;  // timeout / format / buffers changed
+            if (oi == AMEDIACODEC_INFO_TRY_AGAIN_LATER ||
+                oi == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED ||
+                oi == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) continue;
+            if (oi < 0) {
+                mFault.store(true, std::memory_order_release);
+                break;
+            }
             size_t osz = 0;
             uint8_t *out = AMediaCodec_getOutputBuffer(mCodec, (size_t)oi, &osz);
             if (out && info.size > 0) {
@@ -312,7 +325,10 @@ private:
                                 (int64_t)info.presentationTimeUs * 1000);
             }
             const int64_t nowNs = monoNs();
-            AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false);
+            if (AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false) != AMEDIA_OK) {
+                mFault.store(true, std::memory_order_release);
+                break;
+            }
             const int64_t lat = mProbe.match((int64_t)info.presentationTimeUs, nowNs);
             if (lat >= 0) mLat.record(lat);
             mLat.setHeld(mProbe.inFlight());
@@ -333,6 +349,7 @@ private:
     std::atomic<uint32_t> mRetryOk{0};
     std::thread mDrainThread;
     std::atomic<bool> mDrainRun{false};
+    std::atomic<bool> mFault{false};
 };
 
 static inline void installFfmpegLogcat() {

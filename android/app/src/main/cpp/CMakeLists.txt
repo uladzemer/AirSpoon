@@ -11,9 +11,10 @@ set(UXPLAY_LIB third_party/UxPlay/lib)
 
 # ---------- OpenSSL (built from source via openssl-cmake) ----------
 set(BUILD_OPENSSL ON CACHE BOOL "" FORCE)
-set(OPENSSL_BUILD_VERSION "3.4.4" CACHE STRING "" FORCE)
-# SHA-256 архива (совпадает с официальным openssl-3.4.4.tar.gz.sha256 с GitHub): сборка не пройдёт при подмене
-set(OPENSSL_BUILD_HASH "7bdf55ac20f2779e99e5eca306f824fad2b37dee5a06cc35ed5a8b85a6060010" CACHE STRING "" FORCE)
+# Последний патч ветки 3.4: https://openssl-library.org/source/old/3.4/
+set(OPENSSL_BUILD_VERSION "3.4.8" CACHE STRING "" FORCE)
+# https://github.com/openssl/openssl/releases/download/openssl-3.4.8/openssl-3.4.8.tar.gz.sha256
+set(OPENSSL_BUILD_HASH "9de9ce2f29e584044ae07ab93fc601637be01fdc91d109c5a655ec7419e6022b" CACHE STRING "" FORCE)
 set(CROSS_ANDROID ON CACHE BOOL "" FORCE)
 string(REGEX MATCH "[0-9]+" AIRPLAY_ANDROID_API "${ANDROID_PLATFORM}")
 set(OPENSSL_PARAMS "-D__ANDROID_API__=${AIRPLAY_ANDROID_API}" CACHE STRING "" FORCE)
@@ -72,7 +73,8 @@ target_include_directories(plist
 target_compile_definitions(plist PRIVATE
     _GNU_SOURCE
     HAVE_STRNDUP
-    PACKAGE_VERSION="2.6.0"
+    # Версия включённых исходников: third_party/libplist/NEWS.
+    PACKAGE_VERSION="2.7.0"
 )
 
 # ---------- llhttp (embedded in UxPlay) ----------

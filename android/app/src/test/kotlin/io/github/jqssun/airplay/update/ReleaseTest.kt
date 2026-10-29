@@ -47,7 +47,7 @@ class ReleaseTest {
             tagName = "v0.2.0",
             versionName = "0.2.0",
             htmlUrl = "https://github.com/uladzemer/AirSpoon/releases/tag/v0.2.0",
-            apkAsset = ReleaseAsset("airspoon-debug-armeabi-v7a.apk", 12345L, "https://example.com/apk")
+            apkAsset = ReleaseAsset("airspoon-armeabi-v7a.apk", 12345L, "https://example.com/apk")
         )
 
         // Более новая версия
@@ -82,7 +82,12 @@ class ReleaseTest {
                 {
                   "name": "airspoon-debug-armeabi-v7a.apk",
                   "size": 15000000,
-                  "browser_download_url": "https://github.com/uladzemer/AirSpoon/releases/download/v1.2.3/airspoon-debug-armeabi-v7a.apk",
+                  "browser_download_url": "https://example.com/legacy.apk"
+                },
+                {
+                  "name": "airspoon-armeabi-v7a.apk",
+                  "size": 15000000,
+                  "browser_download_url": "https://github.com/uladzemer/AirSpoon/releases/download/v1.2.3/airspoon-armeabi-v7a.apk",
                   "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                 }
               ]
@@ -94,10 +99,10 @@ class ReleaseTest {
         assertEquals("v1.2.3", parsed!!.tagName)
         assertEquals("1.2.3", parsed.versionName)
         assertEquals("https://github.com/uladzemer/AirSpoon/releases/tag/v1.2.3", parsed.htmlUrl)
-        assertEquals("airspoon-debug-armeabi-v7a.apk", parsed.apkAsset.name)
+        assertEquals("airspoon-armeabi-v7a.apk", parsed.apkAsset.name)
         assertEquals(15000000L, parsed.apkAsset.size)
         assertEquals(
-            "https://github.com/uladzemer/AirSpoon/releases/download/v1.2.3/airspoon-debug-armeabi-v7a.apk",
+            "https://github.com/uladzemer/AirSpoon/releases/download/v1.2.3/airspoon-armeabi-v7a.apk",
             parsed.apkAsset.downloadUrl
         )
         assertEquals(

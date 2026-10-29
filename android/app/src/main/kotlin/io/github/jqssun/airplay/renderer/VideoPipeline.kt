@@ -6,6 +6,7 @@ import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.Matrix
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -39,11 +40,17 @@ class VideoPipeline {
     @Volatile private var frameAvailable = false
     private var pendingDisplay: Surface? = null
     private var displayDirty = false
+    private var displayVersion = 0L
+    private var boundDisplayVersion = 0L
     @Volatile private var videoW = 0
     @Volatile private var videoH = 0
 
     fun start() = synchronized(lock) {
+        while (thread != null && !running) lock.wait()
         if (running) return@synchronized
+        displayDirty = pendingDisplay != null
+        frameAvailable = false
+        hasFrame = false
         running = true
         thread = Thread({ _loop() }, "VideoPipeline").also { it.start() }
         while (inputSurface == null && running) lock.wait()
@@ -52,7 +59,19 @@ class VideoPipeline {
     fun setDisplaySurface(surface: Surface?) = synchronized(lock) {
         pendingDisplay = surface
         displayDirty = true
+        val version = ++displayVersion
         lock.notifyAll()
+        if (surface == null && Thread.currentThread() != thread) {
+            val deadline = SystemClock.elapsedRealtime() + 500
+            while (thread != null && boundDisplayVersion < version) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) {
+                    Log.w(TAG, "Display detach timed out")
+                    break
+                }
+                lock.wait(remaining)
+            }
+        }
     }
 
     fun setVideoSize(w: Int, h: Int) {
@@ -62,50 +81,62 @@ class VideoPipeline {
     }
 
     fun release() {
-        synchronized(lock) {
-            if (!running) return
+        val worker = synchronized(lock) {
             running = false
             lock.notifyAll()
+            thread
         }
-        thread?.join()
-        thread = null
+        if (worker != Thread.currentThread()) worker?.join()
     }
 
     private fun _loop() {
         try {
             egl = EglCore()
             _initGl()
-        } catch (e: Exception) {
-            Log.e(TAG, "GL init failed", e)
-            synchronized(lock) { running = false; lock.notifyAll() }
-            return
-        }
-        Matrix.setIdentityM(texMatrix, 0)
-        synchronized(lock) {
-            inputSurface = Surface(surfaceTexture)
-            lock.notifyAll()
-        }
-        while (true) {
-            var newDisplay: Surface? = null
-            var displayChanged = false
-            var doFrame = false
+            Matrix.setIdentityM(texMatrix, 0)
             synchronized(lock) {
-                while (running && !frameAvailable && !displayDirty) lock.wait()
-                if (running && displayDirty) {
-                    newDisplay = pendingDisplay
-                    displayChanged = true
-                    displayDirty = false
-                }
-                if (running && frameAvailable) {
-                    frameAvailable = false
-                    doFrame = true
-                }
+                inputSurface = Surface(surfaceTexture)
+                lock.notifyAll()
             }
-            if (!running) break
-            if (displayChanged) _bindDisplay(newDisplay)
-            if (doFrame) _consumeAndDraw()
+            while (true) {
+                var newDisplay: Surface? = null
+                var displayChanged = false
+                var version = 0L
+                var doFrame = false
+                synchronized(lock) {
+                    while (running && !frameAvailable && !displayDirty) lock.wait()
+                    if (running && displayDirty) {
+                        newDisplay = pendingDisplay
+                        displayChanged = true
+                        version = displayVersion
+                        displayDirty = false
+                    }
+                    if (running && frameAvailable) {
+                        frameAvailable = false
+                        doFrame = true
+                    }
+                }
+                if (!running) break
+                if (displayChanged) {
+                    _bindDisplay(newDisplay)
+                    synchronized(lock) {
+                        boundDisplayVersion = version
+                        lock.notifyAll()
+                    }
+                }
+                if (doFrame) _consumeAndDraw()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "GL loop failed", e)
+        } finally {
+            synchronized(lock) { running = false }
+            _releaseGl()
+            synchronized(lock) {
+                running = false
+                thread = null
+                lock.notifyAll()
+            }
         }
-        _releaseGl()
     }
 
     private fun _bindDisplay(surface: Surface?) {
@@ -206,13 +237,21 @@ class VideoPipeline {
     }
 
     private fun _releaseGl() {
-        surfaceTexture?.release()
+        fun release(action: () -> Unit) {
+            try { action() } catch (e: Throwable) { Log.w(TAG, "GL release failed", e) }
+        }
+        release { surfaceTexture?.release() }
         surfaceTexture = null
-        inputSurface?.release()
+        release { inputSurface?.release() }
         inputSurface = null
         egl?.let {
-            if (window != EGL14.EGL_NO_SURFACE) it.destroySurface(window)
-            it.close()
+            release {
+                if (window != EGL14.EGL_NO_SURFACE) {
+                    it.makeCurrent()
+                    it.destroySurface(window)
+                }
+            }
+            release { it.close() }
         }
         egl = null
         window = EGL14.EGL_NO_SURFACE

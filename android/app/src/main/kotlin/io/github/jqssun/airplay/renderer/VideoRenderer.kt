@@ -4,8 +4,11 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
+import java.nio.ByteBuffer
 import io.github.jqssun.airplay.renderer.DecoderSelector.Companion.videoCaps
 
 class VideoRenderer(ctx: Context) {
@@ -22,6 +25,16 @@ class VideoRenderer(ctx: Context) {
     private var videoWidth = 0
     private var videoHeight = 0
     private var firstFrameQueued = false
+    private val videoConfig = VideoConfig()
+    private val recoveryHandler = Handler(Looper.getMainLooper())
+    @Volatile private var waitingForKeyframe = false
+    private val recoveryTimeout = Runnable {
+        if (waitingForKeyframe) {
+            val message = "Video recovery timed out waiting for keyframe; sender reconnect required"
+            Log.e(TAG, message)
+            benchmarkLogCallback?.invoke(message)
+        }
+    }
 
     // stats
     @Volatile var fps = 0; private set
@@ -85,9 +98,28 @@ class VideoRenderer(ctx: Context) {
             .reduceOrNull { (w1, h1), (w2, h2) -> minOf(w1, w2) to minOf(h1, h2) } ?: (1920 to 1080)
 
     // codec per mirror session; pipeline persists across sessions
-    fun startSession() = synchronized(lock) { _resetStats() }
+    fun startSession() = synchronized(lock) {
+        cancelRecovery()
+        videoConfig.clear()
+        _resetStats()
+    }
 
-    fun stopSession() = synchronized(lock) { stopCodec() }
+    fun stopSession() = synchronized(lock) {
+        cancelRecovery()
+        videoConfig.clear()
+        stopCodec()
+    }
+
+    private fun cancelRecovery() {
+        recoveryHandler.removeCallbacks(recoveryTimeout)
+        waitingForKeyframe = false
+    }
+
+    private fun awaitKeyframe() {
+        if (waitingForKeyframe) return
+        waitingForKeyframe = true
+        recoveryHandler.postDelayed(recoveryTimeout, 5_000L)
+    }
 
     private fun _resetStats() {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
@@ -123,12 +155,15 @@ class VideoRenderer(ctx: Context) {
     fun feedFrame(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
         synchronized(lock) {
             _updateStats(data.size)
+            val keyframe = videoConfig.observe(data, isH265)
             if (videoWidth == 0 || videoHeight == 0) return
 
             if (codec == null || isH265 != currentH265) {
                 // a stale reference frame decodes to corruption, so wait for a keyframe to (re)start
-                if (!_isKeyframe(data, isH265)) {
+                if (!keyframe) {
                     if (codec != null) stopCodec()
+                    awaitKeyframe()
+                    droppedFrames++
                     return
                 }
                 stopCodec()
@@ -136,7 +171,7 @@ class VideoRenderer(ctx: Context) {
 
             try {
                 if (codec == null) startCodec(isH265)
-                _feedToCodec(data, ntpTimeNs)
+                if (_feedToCodec(data, ntpTimeNs) && keyframe) cancelRecovery()
                 drainOutput()
             } catch (e: Exception) {
                 Log.w(TAG, "Codec error, resetting", e)
@@ -145,43 +180,30 @@ class VideoRenderer(ctx: Context) {
         }
     }
 
-    private fun _feedToCodec(data: ByteArray, ntpTimeNs: Long) {
-        val c = codec ?: return
+    private fun _feedToCodec(data: ByteArray, ntpTimeNs: Long): Boolean {
+        val c = codec ?: return false
         // dropping a frame desyncs decoder until the next keyframe, but source would only send one on (re)connect
         val retries = if (firstFrameQueued) FEED_RETRIES else FIRST_FEED_RETRIES
         repeat(retries) {
             val idx = c.dequeueInputBuffer(FEED_WAIT_US)
             if (idx >= 0) {
-                val buf = c.getInputBuffer(idx) ?: return
+                val buf = c.getInputBuffer(idx) ?: error("null video input buffer")
                 buf.clear()
+                if (data.size > buf.remaining()) {
+                    droppedFrames++
+                    // Return the dequeued slot so later frames can still use the codec.
+                    c.queueInputBuffer(idx, 0, 0, ntpTimeNs / 1000, 0)
+                    return false
+                }
                 buf.put(data)
                 c.queueInputBuffer(idx, 0, data.size, ntpTimeNs / 1000, 0)
                 firstFrameQueued = true
-                return
+                return true
             }
             drainOutput()
         }
         droppedFrames++
         Log.w(TAG, "Decoder input queue full; dropping frame. drops=$droppedFrames")
-    }
-
-    private fun _isKeyframe(data: ByteArray, isH265: Boolean): Boolean {
-        if (data.size < 5) return false
-        var i = 0
-        while (i <= data.size - 5) {
-            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
-                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
-                val key = if (isH265) {
-                    val type = (data[i + 4].toInt() shr 1) and 0x3F
-                    type == 19 || type == 20 || type == 21 || type == 32 || type == 33
-                } else {
-                    val type = data[i + 4].toInt() and 0x1F
-                    type == 5 || type == 7
-                }
-                if (key) return true
-            }
-            i++
-        }
         return false
     }
 
@@ -222,6 +244,7 @@ class VideoRenderer(ctx: Context) {
     }
 
     private fun _format(mime: String, info: MediaCodecInfo) = MediaFormat.createVideoFormat(mime, videoWidth, videoHeight).apply {
+        videoConfig.csd().forEachIndexed { index, data -> setByteBuffer("csd-$index", ByteBuffer.wrap(data)) }
         setInteger(MediaFormat.KEY_FRAME_RATE, maxFps)
         if (selector.adaptive(info, mime)) {
             setInteger(MediaFormat.KEY_MAX_WIDTH, videoWidth)
@@ -259,8 +282,9 @@ class VideoRenderer(ctx: Context) {
         codec?.let {
             try {
                 it.stop()
-                it.release()
-            } catch (_: Exception) {}
+            } catch (_: Exception) {} finally {
+                try { it.release() } catch (_: Exception) {}
+            }
         }
         codec = null
     }
@@ -287,6 +311,8 @@ class VideoRenderer(ctx: Context) {
     }
 
     fun release() = synchronized(lock) {
+        cancelRecovery()
+        videoConfig.clear()
         stopCodec()
         pipeline.release()
         _resetStats()

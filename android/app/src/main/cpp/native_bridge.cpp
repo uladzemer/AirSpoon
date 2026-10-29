@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <memory>
 #include <android/log.h>
+#include <openssl/evp.h>
 
 extern "C" {
 #include "raop.h"
@@ -40,6 +41,32 @@ static void _log_callback(void *cls, int level, const char *msg) {
     else if (level == LOGGER_WARNING) prio = ANDROID_LOG_WARN;
     else if (level <= LOGGER_INFO) prio = ANDROID_LOG_INFO;
     __android_log_print(prio, TAG, "%s", msg);
+}
+
+// OpenSSL поставляется вместе с приложением: Ed25519 доступен и на Android API 23.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeVerifyEd25519(
+        JNIEnv *env, jobject thiz, jbyteArray publicKey, jbyteArray message, jbyteArray signature) {
+    if (!publicKey || !message || !signature || env->GetArrayLength(publicKey) != 32 ||
+        env->GetArrayLength(signature) != 64) return JNI_FALSE;
+    const jsize length = env->GetArrayLength(message);
+    if (length <= 0 || length > 64 * 1024) return JNI_FALSE;
+    unsigned char key[32], sig[64];
+    env->GetByteArrayRegion(publicKey, 0, 32, reinterpret_cast<jbyte *>(key));
+    env->GetByteArrayRegion(signature, 0, 64, reinterpret_cast<jbyte *>(sig));
+    if (env->ExceptionCheck()) return JNI_FALSE;
+    jbyte *data = env->GetByteArrayElements(message, nullptr);
+    if (!data) return JNI_FALSE;
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, key, sizeof(key));
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    const bool valid = pkey && ctx &&
+        EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, pkey) == 1 &&
+        EVP_DigestVerify(ctx, sig, sizeof(sig), reinterpret_cast<unsigned char *>(data), length) == 1;
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    env->ReleaseByteArrayElements(message, data, JNI_ABORT);
+    return valid ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C"
@@ -83,6 +110,12 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     int ret = raop_init2(ctx->raop, nohold ? 1 : 0, device_id, keyfile_c);
     if (ret < 0) {
         LOGE("raop_init2 failed: %d", ret);
+        env->ReleaseStringUTFChars(keyFile, keyfile_c);
+        env->ReleaseStringUTFChars(name, name_c);
+        raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
+        delete ctx;
+        return 0;
     }
 
     if (requirePin) {
@@ -90,7 +123,12 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
         int pin = random_pin();
         if (pin < 0) {
             LOGE("Failed to generate random pin");
-            pin = 1234;
+            env->ReleaseStringUTFChars(keyFile, keyfile_c);
+            env->ReleaseStringUTFChars(name, name_c);
+            raop_destroy(ctx->raop);
+            android_callbacks_destroy(&ctx->cb_ctx, env);
+            delete ctx;
+            return 0;
         }
         raop_set_plist(ctx->raop, "pin", pin + 10000);
     }

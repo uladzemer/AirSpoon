@@ -6,3 +6,6 @@
 
 # Keep NativeBridge native methods
 -keep class io.github.jqssun.airplay.bridge.NativeBridge { *; }
+
+# Media3 loads renderers, media sources and extractors through reflection.
+-keep class androidx.media3.** { *; }

@@ -14,9 +14,13 @@
 
 /*
  * lock-free SPSC ring of int16 samples (interleaved frames); positions are
- * non-wrapping 64-bit counters so empty/full are unambiguous without spare slot
+ * 64-bit counters so empty/full are unambiguous without spare slot. size_t wraps
+ * after hours on armv7, breaking counter % capacity for non-power-of-two capacity.
+ * Require lock-free atomics: read() runs on the real-time Oboe callback thread.
  */
 class SpscRing {
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+                  "SpscRing needs lock-free 64-bit counters");
 public:
     explicit SpscRing(size_t capacitySamples)
         : mCapacity(capacitySamples), mBuf(new int16_t[capacitySamples]) {}
@@ -27,8 +31,8 @@ public:
 
     // producer: push up to n samples, drops what doesn't fit
     size_t write(const int16_t *src, size_t n) {
-        const size_t w = mWrite.load(std::memory_order_relaxed);
-        const size_t r = mRead.load(std::memory_order_acquire);
+        const uint64_t w = mWrite.load(std::memory_order_relaxed);
+        const uint64_t r = mRead.load(std::memory_order_acquire);
         const size_t freeSpace = mCapacity - (w - r);
         if (n > freeSpace) n = freeSpace;
         const size_t wi = w % mCapacity;
@@ -41,8 +45,8 @@ public:
 
     // consumer: pop up to n samples
     size_t read(int16_t *dst, size_t n) {
-        const size_t r = mRead.load(std::memory_order_relaxed);
-        const size_t w = mWrite.load(std::memory_order_acquire);
+        const uint64_t r = mRead.load(std::memory_order_relaxed);
+        const uint64_t w = mWrite.load(std::memory_order_acquire);
         const size_t avail = w - r;
         if (n > avail) n = avail;
         const size_t ri = r % mCapacity;
@@ -55,8 +59,8 @@ public:
 
     // consumer: discard up to n oldest samples
     void skip(size_t n) {
-        const size_t r = mRead.load(std::memory_order_relaxed);
-        const size_t w = mWrite.load(std::memory_order_acquire);
+        const uint64_t r = mRead.load(std::memory_order_relaxed);
+        const uint64_t w = mWrite.load(std::memory_order_acquire);
         const size_t avail = w - r;
         if (n > avail) n = avail;
         mRead.store(r + n, std::memory_order_release);
@@ -65,8 +69,8 @@ public:
 private:
     const size_t mCapacity;
     std::unique_ptr<int16_t[]> mBuf;
-    std::atomic<size_t> mWrite{0};
-    std::atomic<size_t> mRead{0};
+    std::atomic<uint64_t> mWrite{0};
+    std::atomic<uint64_t> mRead{0};
 };
 
 /*
@@ -454,6 +458,16 @@ public:
     // consumer: pop frames*channels samples into out, silence-padded on underrun
     void read(int16_t *out, int32_t frames) {
         const size_t need = (size_t)frames * mChannels;
+        if (mFlushRequested.exchange(false, std::memory_order_acquire)) {
+            flushAndReprime();
+            mPrimeSilenceFrames = 0;
+            mAboveCapSinceNs = 0;
+            mLastTrimBlockNs = 0;
+            mFadeIn = true;
+            memset(mLastOut.get(), 0, mChannels * sizeof(int16_t));
+            memset(out, 0, need * sizeof(int16_t));
+            return;
+        }
         const size_t tuned = mTracker.target();
         const int64_t now = monoNs();
 
@@ -618,6 +632,19 @@ public:
     // call after discontinuity or clock shift/resync; producer-side, must not run
     // concurrently with write()
     void reanchorTracker() { mTracker.reanchor(); }
+    void requestReprime() { mFlushRequested.store(true, std::memory_order_release); }
+
+    // Producer stopped/joined by the engine; read head remains consumer-owned.
+    void requestFlush() {
+        mExpectedPtsNs = 0;
+        mPrevSamples = 0;
+        mLastWriteNs.store(0, std::memory_order_relaxed);
+        mUnderran.store(false, std::memory_order_relaxed);
+        mUnderranStall.store(false, std::memory_order_relaxed);
+        mTracker.reanchor();
+        mTracker.noteRestart();
+        mFlushRequested.store(true, std::memory_order_release);
+    }
 
     // rebuild prebuffer cushion before resuming, e.g. after output stream restart;
     // must not run concurrently with read()
@@ -725,6 +752,7 @@ private:
     int64_t mLastTrimBlockNs = 0;        // consumer-only: last trim/underrun time (trim throttle)
     int64_t mAboveCapSinceNs = 0;        // consumer-only: when backlog first exceeded cap (0 = under)
     std::atomic<bool> mUnderran{false};  // consumer->producer: underrun happened
+    std::atomic<bool> mFlushRequested{false};
     std::atomic<bool> mUnderranStall{false};  // consumer->producer: that underrun counts as a Wi-Fi stall
     uint64_t mPlayedFrames = 0;          // consumer-only: frames played since last priming exit
 

@@ -63,7 +63,7 @@ object UpdateInstaller {
      * Установка APK через PackageInstaller (MODE_FULL_INSTALL).
      * Статус установки отправляется в InstallStatusReceiver через PendingIntent.
      */
-    fun installPackage(context: Context, apkFile: File) {
+    fun installPackage(context: Context, apkFile: File, canCommit: () -> Boolean): Boolean {
         val packageInstaller = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
@@ -74,14 +74,15 @@ object UpdateInstaller {
         val session = packageInstaller.openSession(sessionId)
 
         try {
-            writeAndCommit(context, session, sessionId, apkFile)
+            return writeAndCommit(context, session, sessionId, apkFile, canCommit)
         } catch (e: Exception) {
             runCatching { session.abandon() }
             throw e
         }
     }
 
-    private fun writeAndCommit(context: Context, session: PackageInstaller.Session, sessionId: Int, apkFile: File) {
+    private fun writeAndCommit(context: Context, session: PackageInstaller.Session, sessionId: Int, apkFile: File,
+                               canCommit: () -> Boolean): Boolean {
         session.use { s ->
             s.openWrite("airspoon_update", 0, apkFile.length()).use { out ->
                 apkFile.inputStream().use { input ->
@@ -105,7 +106,12 @@ object UpdateInstaller {
                 flags
             )
 
+            if (!canCommit()) {
+                s.abandon()
+                return false
+            }
             s.commit(pendingIntent.intentSender)
+            return true
         }
     }
 }

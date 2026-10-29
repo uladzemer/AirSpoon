@@ -56,6 +56,7 @@ object Prefs {
     const val AUTO = "auto"; const val ON = "on"; const val OFF = "off"
     const val PORTRAIT = "portrait"; const val LANDSCAPE = "landscape"
     const val FALLBACK_MAC_ADDRESS = "fallback_mac_address"
+    const val KEY_SERVER_STOPPED = "server_stopped"
     val ADAPTIVE_PERCENTILES = intArrayOf(80, 85, 90, 95, 99)
     private val SIZE = Regex("[1-9]\\d{0,4}x[1-9]\\d{0,4}")
 

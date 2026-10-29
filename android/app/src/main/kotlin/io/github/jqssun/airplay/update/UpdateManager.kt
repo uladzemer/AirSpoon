@@ -16,6 +16,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.channels.Channel
+import java.util.concurrent.atomic.AtomicLong
 import java.io.File
 
 /**
@@ -38,10 +41,22 @@ object UpdateManager {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var checkJob: Job? = null
     private var downloadJob: Job? = null
+    private var installJob: Job? = null
+    private val downloadGeneration = AtomicLong()
     private var pendingRelease: ReleaseInfo? = null
     private var pendingApk: File? = null
     private var appContext: Context? = null
-    private var sessionActive: () -> Boolean = { false }
+    @Volatile private var sessionActive: () -> Boolean = { false }
+    private var activityVisible = false
+
+    fun setSessionActive(check: () -> Boolean) { sessionActive = check }
+
+    fun onActivityStarted() {
+        activityVisible = true
+        onReturnToWaitingScreen()
+    }
+
+    fun onActivityStopped() { activityVisible = false }
 
     private val _dialogState = MutableStateFlow<UpdateDialogState?>(null)
     val dialogState: StateFlow<UpdateDialogState?> = _dialogState.asStateFlow()
@@ -54,8 +69,8 @@ object UpdateManager {
      */
     fun checkForUpdates(
         context: Context,
-        isSessionActive: () -> Boolean,
-        force: Boolean = false
+        force: Boolean = false,
+        background: Boolean = false
     ) {
         if (!BuildConfig.UPDATE_CHECK) {
             Log.d(TAG, "Update check disabled in build")
@@ -75,8 +90,8 @@ object UpdateManager {
             Log.d(TAG, "Skipping update check: last checked ${(now - lastCheck) / 1000}s ago")
             return
         }
-        if (checkJob?.isActive == true || downloadJob?.isActive == true || _dialogState.value != null) return
-        sessionActive = isSessionActive
+        if (checkJob?.isActive == true || downloadJob?.isActive == true ||
+            _dialogState.value != null || pendingRelease != null) return
 
         checkJob = scope.launch {
             Log.i(TAG, "Checking for updates (current version: ${BuildConfig.VERSION_NAME})...")
@@ -87,8 +102,8 @@ object UpdateManager {
             if (release != null && !newer) markChecked(prefs)
             if (release != null && newer) {
                 Log.i(TAG, "Update available: ${release.tagName}")
-                if (isSessionActive()) {
-                    Log.i(TAG, "Session active, holding update offer until session ends")
+                if (background || !activityVisible || sessionActive()) {
+                    Log.i(TAG, "Holding update offer until Activity is visible and idle")
                     pendingRelease = release
                 } else {
                     _dialogState.value = UpdateDialogState.Offer(release)
@@ -104,6 +119,7 @@ object UpdateManager {
      * показываем диалог сейчас.
      */
     fun onReturnToWaitingScreen() {
+        if (!activityVisible || sessionActive()) return
         pendingApk?.let { apk ->
             pendingApk = null
             appContext?.let { install(it, apk) }
@@ -122,7 +138,7 @@ object UpdateManager {
      */
     fun onUserDismiss() {
         pendingRelease = null
-        pendingApk = null
+        discardPendingApks()
         _dialogState.value = null
         appContext?.let { markChecked(it.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)) }
     }
@@ -130,26 +146,58 @@ object UpdateManager {
     private fun markChecked(prefs: SharedPreferences) =
         prefs.edit().putLong(Prefs.KEY_LAST_UPDATE_CHECK_MS, System.currentTimeMillis()).apply()
 
+    private fun discardPendingApks() {
+        val files = listOfNotNull(pendingApk, (_dialogState.value as? UpdateDialogState.PermissionRequired)?.apkFile).distinct()
+        pendingApk = null
+        scope.launch(Dispatchers.IO) { files.forEach { it.delete() } }
+    }
+
     /**
      * Запуск скачивания обновления.
      */
     fun startDownload(context: Context, release: ReleaseInfo) {
+        if (installJob?.isActive == true) return
         appContext = context.applicationContext
+        discardPendingApks()
+        val generation = downloadGeneration.incrementAndGet()
         downloadJob?.cancel()
         _dialogState.value = UpdateDialogState.Downloading(release, 0)
 
         downloadJob = scope.launch {
-            try {
-                val apkFile = UpdateDownloader.download(context, release.apkAsset) { progress ->
-                    _dialogState.value = UpdateDialogState.Downloading(release, progress)
+            var downloaded: File? = null
+            val progress = Channel<Int>(Channel.CONFLATED)
+            val progressJob = launch {
+                for (value in progress) {
+                    if (generation == downloadGeneration.get()) {
+                        _dialogState.value = UpdateDialogState.Downloading(release, value)
+                    }
                 }
+            }
+            try {
+                val apkFile = UpdateDownloader.downloadUpdate(context, release) { value ->
+                    if (generation == downloadGeneration.get()) progress.trySend(value)
+                }
+                downloaded = apkFile
+                coroutineContext.ensureActive()
+                if (generation != downloadGeneration.get()) {
+                    apkFile.delete()
+                    return@launch
+                }
+                progressJob.cancel()
                 onDownloadCompleted(context, release, apkFile)
+                downloaded = null
             } catch (e: CancellationException) {
                 Log.d(TAG, "Download cancelled")
-                _dialogState.value = null
+                if (generation == downloadGeneration.get()) _dialogState.value = null
             } catch (e: Throwable) {
                 Log.e(TAG, "Download error", e)
-                _dialogState.value = UpdateDialogState.Error(e.message ?: context.getString(R.string.update_download_failed))
+                if (generation == downloadGeneration.get()) {
+                    _dialogState.value = UpdateDialogState.Error(e.message ?: context.getString(R.string.update_download_failed))
+                }
+            } finally {
+                progress.close()
+                progressJob.cancel()
+                downloaded?.delete()
             }
         }
     }
@@ -158,6 +206,7 @@ object UpdateManager {
      * Отмена текущего скачивания пользователем.
      */
     fun cancelDownload() {
+        downloadGeneration.incrementAndGet()
         downloadJob?.cancel()
         downloadJob = null
         _dialogState.value = null
@@ -179,17 +228,23 @@ object UpdateManager {
     // Запись APK в сессию — десятки МБ, поэтому не в главном потоке; сбой — в диалог, а не авария.
     // Если тем временем начался показ, ставим после него: установка закрывает приложение.
     private fun install(context: Context, apkFile: File) {
+        if (installJob?.isActive == true) return
         _dialogState.value = null
         if (sessionActive()) {
             Log.i(TAG, "Session active, holding install until session ends")
             pendingApk = apkFile
             return
         }
-        scope.launch {
+        installJob = scope.launch {
             try {
-                withContext(Dispatchers.IO) { UpdateInstaller.installPackage(context.applicationContext, apkFile) }
+                val committed = withContext(Dispatchers.IO) {
+                    UpdateInstaller.installPackage(context.applicationContext, apkFile) { !sessionActive() }
+                        .also { if (it) apkFile.delete() }
+                }
+                if (!committed) pendingApk = apkFile
             } catch (e: Exception) {
                 Log.e(TAG, "Install session error", e)
+                withContext(Dispatchers.IO) { apkFile.delete() }
                 _dialogState.value = UpdateDialogState.Error(e.message ?: context.getString(R.string.update_install_failed))
             }
         }

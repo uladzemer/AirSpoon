@@ -63,6 +63,8 @@ import io.github.jqssun.airplay.renderer.AirPlayVideoPlayer
 import io.github.jqssun.airplay.renderer.AudioRenderer
 import io.github.jqssun.airplay.renderer.VideoRenderer
 import io.github.jqssun.airplay.viewmodel.DebugInfo
+import io.github.jqssun.airplay.update.UpdateManager
+import io.github.jqssun.airplay.update.updateBusy
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.security.SecureRandom
@@ -73,6 +75,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class VideoPlaybackInfo(
@@ -123,6 +129,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private val _connectionCount = MutableStateFlow(0)
     val connectionCount = _connectionCount.asStateFlow()
+
+    val isBusyForUpdate: Boolean get() = updateBusy(
+        _videoPlaybackActive.value, videoSessionPending(), _mirroringActive.value,
+        _audioOnly.value, _connectionCount.value
+    )
 
     private val _videoAspect = MutableStateFlow(16f / 9f)
     val videoAspect = _videoAspect.asStateFlow()
@@ -237,6 +248,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onCreate() {
         super.onCreate()
+        UpdateManager.setSessionActive { isBusyForUpdate }
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(24 * 60 * 60 * 1000L)
+                UpdateManager.checkForUpdates(this@AirPlayService, background = true)
+            }
+        }
         createNotificationChannel()
         dacpController = DacpController(this)
         dacpPlayer = DacpPlayer(
@@ -368,9 +386,17 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         if (intent?.action == ACTION_START_SERVER) {
-            promoteToForeground()
-            val showScreen = intent.getBooleanExtra(EXTRA_SHOW_SCREEN, false)
+            prefs.edit().putBoolean(Prefs.KEY_SERVER_STOPPED, false).commit()
+        }
+        promoteToForeground()
+        if (prefs.getBoolean(Prefs.KEY_SERVER_STOPPED, false)) {
+            _stopServer()
+            return START_NOT_STICKY
+        }
+        if (intent == null || intent.action == ACTION_START_SERVER) {
+            val showScreen = intent?.getBooleanExtra(EXTRA_SHOW_SCREEN, false) == true
             // после загрузки приставки экран ожидания открываем один раз, как только сервер поднят
             // (см. конец _startServer): в какой момент это случится (сразу, когда появится сеть или
             // после повтора запуска), от нас не зависит
@@ -402,7 +428,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 }
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     // экран ожидания с задержкой (лаунчер после загрузки появляется не сразу); повторный вызов заменяет прежний
@@ -414,6 +440,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private val openScreenRunnable = Runnable { ScreenLauncher.open(applicationContext) }
 
     fun startServer() {
+        prefs.edit().putBoolean(Prefs.KEY_SERVER_STOPPED, false).commit()
         _startServer(ensureServiceStarted = true)
     }
 
@@ -724,6 +751,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun stopServer() {
+        prefs.edit().putBoolean(Prefs.KEY_SERVER_STOPPED, true).commit()
+        _stopServer()
+    }
+
+    private fun _stopServer() {
         // пользователь (или система) остановил приём: сеть больше ждать не нужно, повторов и экрана не будет
         _stopWaitingForNetwork()
         _clearStartState()
@@ -841,7 +873,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onDestroy() {
-        stopServer()
+        _stopServer()
+        UpdateManager.setSessionActive { false }
         dacpPlayer.release()
         mediaReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
@@ -1011,15 +1044,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onConnectionInit() {
-        val firstConnection = _connectionCount.value == 0
-        _connectionCount.value++
+        val firstConnection = _connectionCount.getAndUpdate { it + 1 } == 0
         log("Sender connected (${_connectionCount.value})")
         if (firstConnection && shouldLaunchOnConnect()) launchMainActivity()
     }
 
     override fun onConnectionDestroy() {
-        _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
-        if (_connectionCount.value == 0) {
+        val remaining = _connectionCount.decrementConnectionCount()
+        if (remaining == 0) {
             // clients may drop without POST /stop; must run before the poll-state reset
             _endVideoPlayback("AirPlay Video stopped (disconnect)")
             // last client gone: release audio output devices to save power
@@ -1045,7 +1077,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _refreshDacpPlayer()
             _updateMediaNotification()
         }
-        log("Sender disconnected (${_connectionCount.value})")
+        log("Sender disconnected ($remaining)")
     }
 
     override fun onConnectionReset(reason: Int) {
@@ -1060,21 +1092,40 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onMetadata(data: ByteArray) {
-        val map = DmapParser.parse(data)
-        val info = TrackInfo.fromDmap(map, _trackInfo.value.coverArt)
-        _trackInfo.value = info
-        if (info.durationMs > 0) _durationMs.value = info.durationMs
-        _updateMediaMetadata()
-        _refreshDacpPlayer()
-        log("Track: ${info.artist} - ${info.title}")
+        try {
+            val map = DmapParser.parse(data)
+            val info = TrackInfo.fromDmap(map, _trackInfo.value.coverArt)
+            _trackInfo.value = info
+            if (info.durationMs > 0) _durationMs.value = info.durationMs
+            _updateMediaMetadata()
+            _refreshDacpPlayer()
+            log("Track: ${info.artist} - ${info.title}")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Ignoring invalid metadata", e)
+        }
     }
 
     override fun onCoverArt(data: ByteArray) {
-        val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return
-        _coverArtBytes = data
-        _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
-        _updateMediaMetadata()
-        _refreshDacpPlayer()
+        if (data.size > 8 * 1024 * 1024) return
+        try {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(data, 0, data.size, options)
+            val w = options.outWidth
+            val h = options.outHeight
+            if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || w.toLong() * h > 64L * 1024 * 1024) return
+            options.inJustDecodeBounds = false
+            options.inSampleSize = 1
+            while ((maxOf(w, h) + options.inSampleSize - 1) / options.inSampleSize > 1024) {
+                options.inSampleSize *= 2
+            }
+            val bmp = BitmapFactory.decodeByteArray(data, 0, data.size, options) ?: return
+            _coverArtBytes = data
+            _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
+            _updateMediaMetadata()
+            _refreshDacpPlayer()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Ignoring invalid cover art", e)
+        }
     }
 
     override fun onProgress(start: Long, curr: Long, end: Long) {

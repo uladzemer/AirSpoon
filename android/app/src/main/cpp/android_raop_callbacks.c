@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 #include <android/log.h>
 #include "android_raop_callbacks.h"
 #include "audio_engine.h"
@@ -15,11 +16,33 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+static pthread_key_t env_key;
+static pthread_once_t env_key_once = PTHREAD_ONCE_INIT;
+static int env_key_status;
+
+static void _detach_env(void *value) {
+    JavaVM *jvm = (JavaVM *)value;
+    (*jvm)->DetachCurrentThread(jvm);
+}
+
+static void _make_env_key(void) {
+    env_key_status = pthread_key_create(&env_key, _detach_env);
+}
+
 static JNIEnv *_get_env(android_callback_ctx_t *ctx) {
     JNIEnv *env = NULL;
     int status = (*ctx->jvm)->GetEnv(ctx->jvm, (void **)&env, JNI_VERSION_1_6);
     if (status == JNI_EDETACHED) {
-        (*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL);
+        if (pthread_once(&env_key_once, _make_env_key) != 0 || env_key_status != 0) return NULL;
+        if ((*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL) != JNI_OK) return NULL;
+        /* Only threads attached here are detached at pthread exit. Store the VM,
+           not ctx: the callback context may already be gone at thread exit. */
+        if (pthread_setspecific(env_key, ctx->jvm) != 0) {
+            (*ctx->jvm)->DetachCurrentThread(ctx->jvm);
+            return NULL;
+        }
+    } else if (status != JNI_OK) {
+        return NULL;
     }
     /* Clear any pending exception from a previous callback on this thread,
        otherwise JNI calls like NewByteArray will fatally abort. */
@@ -120,6 +143,10 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
     }
 
     jbyteArray arr = (*env)->NewByteArray(env, data->data_len);
+    if (!arr) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
     (*env)->SetByteArrayRegion(env, arr, 0, data->data_len, (jbyte *)data->data);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_data,
                            arr, (jlong)data->ntp_time_local, (jboolean)data->is_h265);
@@ -218,7 +245,10 @@ static void _video_reset(void *cls, reset_type_t t) {
         raop_remove_hls_connections(ctx->raop);
     }
 }
-static void _audio_flush(void *cls) { LOGI("audio_flush"); }
+static void _audio_flush(void *cls) {
+    android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
+    audio_engine_flush(ctx->audio_engine);
+}
 
 static void _audio_stop_coverart_rendering(void *cls) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
@@ -239,6 +269,10 @@ static void _audio_set_metadata(void *cls, const void *buf, int len) {
     JNIEnv *env = _get_env(ctx);
     if (!env || !buf || len <= 0) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_metadata, arr);
     (*env)->DeleteLocalRef(env, arr);
@@ -249,6 +283,10 @@ static void _audio_set_coverart(void *cls, const void *buf, int len) {
     JNIEnv *env = _get_env(ctx);
     if (!env || !buf || len <= 0) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_coverart, arr);
     (*env)->DeleteLocalRef(env, arr);

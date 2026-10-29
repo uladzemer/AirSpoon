@@ -1,6 +1,7 @@
 package io.github.jqssun.airplay.audio
 
 import android.os.Looper
+import android.os.Handler
 import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -8,7 +9,7 @@ import androidx.media3.common.SimpleBasePlayer
 import androidx.media3.common.util.UnstableApi
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import com.google.common.util.concurrent.MoreExecutors
+import java.util.concurrent.Executor
 
 // exposes sender's audio session as media3 player
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -19,6 +20,8 @@ class DacpPlayer(
     private val positionMs: () -> Long,
     private val setPlaying: (Boolean) -> Unit,
 ) : SimpleBasePlayer(looper) {
+    private val playerHandler = Handler(looper)
+    private val playerExecutor = Executor { playerHandler.post(it) }
 
     data class Snapshot(
         val track: TrackInfo,
@@ -84,7 +87,7 @@ class DacpPlayer(
         return Futures.transform(
             if (playWhenReady) dacp.play() else dacp.pause(),
             { setPlaying(playWhenReady) },
-            MoreExecutors.directExecutor()
+            playerExecutor
         )
     }
 

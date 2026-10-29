@@ -44,10 +44,11 @@ data class ReleaseInfo(
     val tagName: String,
     val versionName: String,
     val htmlUrl: String,
-    val apkAsset: ReleaseAsset
+    val apkAsset: ReleaseAsset,
+    val assets: List<ReleaseAsset> = emptyList()
 )
 
-const val TARGET_APK_ASSET = "airspoon-debug-armeabi-v7a.apk"
+const val TARGET_APK_ASSET = "airspoon-armeabi-v7a.apk"
 
 /**
  * Разбор JSON ответа GitHub Releases (/releases/latest).
@@ -60,35 +61,27 @@ fun parseRelease(jsonStr: String): ReleaseInfo? = try {
     else {
         val htmlUrl = json.optString("html_url", "")
         val assets = json.optJSONArray("assets")
-        var matchedAsset: ReleaseAsset? = null
+        val releaseAssets = mutableListOf<ReleaseAsset>()
         if (assets != null) {
             for (i in 0 until assets.length()) {
                 val assetObj = assets.optJSONObject(i) ?: continue
                 val name = assetObj.optString("name", "")
-                if (name == TARGET_APK_ASSET) {
-                    val size = assetObj.optLong("size", -1L)
-                    val downloadUrl = assetObj.optString("browser_download_url", "")
-                    if (downloadUrl.isEmpty()) continue
-                    val digest = if (assetObj.has("digest") && !assetObj.isNull("digest")) {
-                        assetObj.optString("digest")
-                    } else null
-                    matchedAsset = ReleaseAsset(
-                        name = name,
-                        size = size,
-                        downloadUrl = downloadUrl,
-                        digest = digest
-                    )
-                    break
-                }
+                releaseAssets += ReleaseAsset(
+                    name, assetObj.optLong("size", -1L),
+                    assetObj.optString("browser_download_url", ""),
+                    if (assetObj.isNull("digest")) null else assetObj.optString("digest")
+                )
             }
         }
+        val matchedAsset = releaseAssets.singleOrNull { it.name == TARGET_APK_ASSET && it.downloadUrl.isNotEmpty() }
         matchedAsset?.let { asset ->
             val versionName = if (tagName.startsWith("v", ignoreCase = true)) tagName.substring(1) else tagName
             ReleaseInfo(
                 tagName = tagName,
                 versionName = versionName,
                 htmlUrl = htmlUrl,
-                apkAsset = asset
+                apkAsset = asset,
+                assets = releaseAssets
             )
         }
     }

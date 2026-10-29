@@ -80,7 +80,7 @@ dnssd_init(const char *name, int name_len, const char *hw_addr, int hw_addr_len,
     dnssd->features1 = (uint32_t) strtoul(FEATURES_1, NULL, 16);
     dnssd->features2 = (uint32_t) strtoul(FEATURES_2, NULL, 16);
     dnssd->pin_pw = pin_pw;
-    strncpy(dnssd->codec_cn, RAOP_CN, sizeof(dnssd->codec_cn) - 1);
+    strncpy(dnssd->codec_cn, "1,2,3", sizeof(dnssd->codec_cn) - 1);
     return dnssd;
 }
 
@@ -266,12 +266,12 @@ const char *android_dnssd_get_airplay_txt_val(dnssd_t *dnssd, int index) {
 }
 
 void android_dnssd_set_codecs(dnssd_t *dnssd, int alac, int aac) {
-    /* Build cn string: 0=PCM (always), 1=ALAC, 2=AAC, 3=AAC-ELD */
+    /* 1=ALAC, 2=AAC, 3=AAC-ELD; PCM has no decoder. */
     char buf[16];
     int pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "0");
-    if (alac) pos += snprintf(buf + pos, sizeof(buf) - pos, ",1");
-    if (aac) pos += snprintf(buf + pos, sizeof(buf) - pos, ",2,3");
+    buf[0] = '\0';
+    if (alac) pos += snprintf(buf + pos, sizeof(buf) - pos, "1");
+    if (aac) pos += snprintf(buf + pos, sizeof(buf) - pos, "%s2,3", pos ? "," : "");
     strncpy(dnssd->codec_cn, buf, sizeof(dnssd->codec_cn) - 1);
 }
 
